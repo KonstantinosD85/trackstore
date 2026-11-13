@@ -1,9 +1,16 @@
 services:
   postgres:
-    image: 'postgres:latest'
+    image: 'postgres:17'
     environment:
-      - 'POSTGRES_DB=mydatabase'
+      - 'POSTGRES_DB=trackstore'
       - 'POSTGRES_PASSWORD=secret'
-      - 'POSTGRES_USER=myuser'
+      - 'POSTGRES_USER=trackstore'
     ports:
-      - '5432'
+      - '5432'   # random host port; Spring Boot discovers it automatically
+
+  kafka:
+    # Single-node Kafka in KRaft mode (no ZooKeeper). The image's default config
+    # advertises localhost:9092, which works both from your machine and inside the container.
+    image: 'apache/kafka:4.1.0'
+    ports:
+      - '9092:9092'   # fixed: Spring Boot has no auto service-connection for this image
