@@ -43,11 +43,11 @@ Each step is small, reviewed, and committed before moving on.
 |----|------|-----------------|--------|
 | 1  | Dev environment: Java 21, Postgres + Kafka in Compose, app boots | Docker Compose support, `application.yaml` | ✅ Done |
 | 2  | Domain model: `TrackUpdate` record, `Identity` enum, validation rules | Records, Bean Validation | ✅ Done |
-| 3  | Unit tests for validation | JUnit 5, AssertJ | ⬜ |
+| 3  | Unit tests for validation | JUnit 5, AssertJ | ✅ Done |
 | 4  | History storage: entity, repository, unique constraint | JPA, Spring Data repositories | ⬜ |
 | 5  | Picture storage with "newer timestamp wins" upsert | `@Modifying` queries, `@Transactional` | ⬜ |
 | 6  | `TrackUpdateService` + ordering/idempotency tests | Service layer, `@DataJpaTest` | ⬜ |
-| 7  | Kafka consumer: JSON parsing, invalid → log + dead-letter topic | `@KafkaListener`, error handlers | ⬜ |
+| 7  | Kafka consumer: JSON parsing, invalid → log + dead-letter topic (incl. tests for unparseable JSON, e.g. `"identity": "ENEMY"`, bad timestamp) | `@KafkaListener`, error handlers | ⬜ |
 | 8  | REST API for the three endpoints | `@RestController`, DTOs, 404 handling | ⬜ |
 | 9  | Producer (moving tracks + duplicate, out-of-order, invalid messages) | `CommandLineRunner` or script | ⬜ |
 | 10 | Stretch: stale tracks, health endpoint / consumer lag | `@Scheduled`, Actuator | ⬜ |
