@@ -5,6 +5,7 @@ import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
 
@@ -19,6 +20,7 @@ import java.time.Instant;
 public record TrackUpdate(
 
         @NotBlank
+        @Size(max = MAX_TRACK_ID_LENGTH)
         String trackId,
 
         @NotNull
@@ -44,4 +46,7 @@ public record TrackUpdate(
         @NotNull
         Identity identity
 ) {
+
+    /** Must match the {@code track_id} column length in the database schema. */
+    public static final int MAX_TRACK_ID_LENGTH = 64;
 }

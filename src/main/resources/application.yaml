@@ -3,3 +3,10 @@ spring:
     name: trackstore
   kafka:
     bootstrap-servers: localhost:9092
+  jpa:
+    # Flyway owns the schema (src/main/resources/db/migration); Hibernate only checks
+    # at startup that the entities match the tables, and fails fast if they don't.
+    hibernate:
+      ddl-auto: validate
+    # We have no lazy-loading in web views; keep DB sessions out of HTTP requests.
+    open-in-view: false

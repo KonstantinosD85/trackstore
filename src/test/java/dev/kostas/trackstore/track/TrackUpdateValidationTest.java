@@ -68,6 +68,21 @@ class TrackUpdateValidationTest {
             assertThat(invalidFields(aTrackUpdate().trackId(trackId).build()))
                     .containsExactly("trackId");
         }
+
+        @Test
+        void acceptsMaximumLength() {
+            String longestAllowed = "T".repeat(TrackUpdate.MAX_TRACK_ID_LENGTH);
+
+            assertThat(invalidFields(aTrackUpdate().trackId(longestAllowed).build())).isEmpty();
+        }
+
+        @Test
+        void rejectsIdsLongerThanMaximum() {
+            String tooLong = "T".repeat(TrackUpdate.MAX_TRACK_ID_LENGTH + 1);
+
+            assertThat(invalidFields(aTrackUpdate().trackId(tooLong).build()))
+                    .containsExactly("trackId");
+        }
     }
 
     @Nested

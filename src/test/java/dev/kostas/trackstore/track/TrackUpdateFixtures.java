@@ -8,16 +8,16 @@ import java.time.Instant;
  * Starts from a fully valid update; tests override only the field they care about,
  * e.g. {@code aTrackUpdate().latitude(91.0).build()}.
  */
-final class TrackUpdateFixtures {
+public final class TrackUpdateFixtures {
 
     private TrackUpdateFixtures() {
     }
 
-    static Builder aTrackUpdate() {
+    public static Builder aTrackUpdate() {
         return new Builder();
     }
 
-    static final class Builder {
+    public static final class Builder {
 
         private String trackId = "TRK-001";
         private Instant timestamp = Instant.parse("2026-01-01T12:00:00Z");
@@ -27,42 +27,42 @@ final class TrackUpdateFixtures {
         private Double heading = 90.0;
         private Identity identity = Identity.UNKNOWN;
 
-        Builder trackId(String trackId) {
+        public Builder trackId(String trackId) {
             this.trackId = trackId;
             return this;
         }
 
-        Builder timestamp(Instant timestamp) {
+        public Builder timestamp(Instant timestamp) {
             this.timestamp = timestamp;
             return this;
         }
 
-        Builder latitude(Double latitude) {
+        public Builder latitude(Double latitude) {
             this.latitude = latitude;
             return this;
         }
 
-        Builder longitude(Double longitude) {
+        public Builder longitude(Double longitude) {
             this.longitude = longitude;
             return this;
         }
 
-        Builder altitude(Double altitude) {
+        public Builder altitude(Double altitude) {
             this.altitude = altitude;
             return this;
         }
 
-        Builder heading(Double heading) {
+        public Builder heading(Double heading) {
             this.heading = heading;
             return this;
         }
 
-        Builder identity(Identity identity) {
+        public Builder identity(Identity identity) {
             this.identity = identity;
             return this;
         }
 
-        TrackUpdate build() {
+        public TrackUpdate build() {
             return new TrackUpdate(trackId, timestamp, latitude, longitude, altitude, heading, identity);
         }
     }

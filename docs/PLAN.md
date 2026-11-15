@@ -44,7 +44,8 @@ Each step is small, reviewed, and committed before moving on.
 | 1  | Dev environment: Java 21, Postgres + Kafka in Compose, app boots | Docker Compose support, `application.yaml` | ✅ Done |
 | 2  | Domain model: `TrackUpdate` record, `Identity` enum, validation rules | Records, Bean Validation | ✅ Done |
 | 3  | Unit tests for validation | JUnit 5, AssertJ | ✅ Done |
-| 4  | History storage: entity, repository, unique constraint | JPA, Spring Data repositories | ⬜ |
+| 4a | History storage: Flyway schema, entity, repository, unique constraint | Flyway, JPA, Spring Data repositories | ✅ Done |
+| 4b | History repository tests against real Postgres (append, duplicate, range query) | Testcontainers, `@DataJpaTest`, `@ServiceConnection` | ✅ Done |
 | 5  | Picture storage with "newer timestamp wins" upsert | `@Modifying` queries, `@Transactional` | ⬜ |
 | 6  | `TrackUpdateService` + ordering/idempotency tests | Service layer, `@DataJpaTest` | ⬜ |
 | 7  | Kafka consumer: JSON parsing, invalid → log + dead-letter topic (incl. tests for unparseable JSON, e.g. `"identity": "ENEMY"`, bad timestamp) | `@KafkaListener`, error handlers | ⬜ |
@@ -63,3 +64,12 @@ Each step is small, reviewed, and committed before moving on.
 - Kafka clients connect to the bootstrap address, then reconnect to the broker's *advertised*
   listener. With the same port inside and outside the container (`9092:9092`), the default
   `localhost:9092` works from both sides.
+- **Flyway is SQL-first**: migrations are hand-written `V<n>__<name>.sql` files, applied once and
+  recorded (with a checksum) in `flyway_schema_history`. Never edit an applied migration — add a
+  new one. Hibernate runs with `ddl-auto: validate` as a safety net: the app fails at startup if
+  entities and tables disagree. (Autogenerate à la Alembic exists via Liquibase + liquibase-hibernate
+  or IntelliJ Ultimate, but generated DDL drops named constraints/defaults that matter here.)
+- **Duplicates via `INSERT ... ON CONFLICT DO NOTHING`**, not `save()` + catch: a JPA constraint
+  violation marks the whole transaction rollback-only, which would also undo the picture update.
+- **Validation must mirror DB constraints** (`@Size(max = 64)` ↔ `VARCHAR(64)`); otherwise a message
+  passes validation, fails on insert, and becomes a poison message that blocks its partition.
