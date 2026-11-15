@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
 import java.time.Instant;
+import java.util.List;
 
 public interface TrackStateRepository extends JpaRepository<TrackState, String> {
 
@@ -50,7 +51,8 @@ public interface TrackStateRepository extends JpaRepository<TrackState, String> 
                     altitude         = EXCLUDED.altitude,
                     heading          = EXCLUDED.heading,
                     identity         = EXCLUDED.identity,
-                    last_received_at = now()
+                    last_received_at = now(),
+                    status           = 'ACTIVE'
                 WHERE track_picture.observed_at < EXCLUDED.observed_at
             """)
     int insertOrReplaceIfNewer(String trackId,
@@ -60,4 +62,33 @@ public interface TrackStateRepository extends JpaRepository<TrackState, String> 
                                Double altitude,
                                Double heading,
                                String identity);
+
+    /**
+     * Removes tracks whose latest observation is older than {@code cutoff} (dropped tracks).
+     * Their history is not touched.
+     * <p>
+     * Not {@code @Modifying}: with {@code RETURNING}, PostgreSQL answers the statement with rows,
+     * so Spring Data runs it like a query and hands back the affected ids for logging.
+     *
+     * @return the ids of the removed tracks
+     */
+    @Query(nativeQuery = true, value = """
+            DELETE FROM track_picture
+            WHERE observed_at < :cutoff
+            RETURNING track_id
+            """)
+    List<String> deleteObservedBefore(Instant cutoff);
+
+    /**
+     * Marks active tracks whose latest observation is older than {@code cutoff} as stale.
+     *
+     * @return the ids of the tracks that just became stale
+     */
+    @Query(nativeQuery = true, value = """
+            UPDATE track_picture
+            SET status = 'STALE'
+            WHERE status = 'ACTIVE' AND observed_at < :cutoff
+            RETURNING track_id
+            """)
+    List<String> markStaleIfObservedBefore(Instant cutoff);
 }

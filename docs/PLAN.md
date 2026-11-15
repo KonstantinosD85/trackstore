@@ -52,7 +52,8 @@ Each step is small, reviewed, and committed before moving on.
 | 7b | Listener tests on real Kafka: valid/duplicate/out-of-order, invalid values, unparseable JSON (e.g. `"identity": "ENEMY"`) → DLT | Testcontainers Kafka, `@SpringBootTest`, Awaitility | ✅ Done |
 | 8  | REST API: `GET /picture`, `GET /tracks/{id}`, `GET /tracks/{id}/history?from&to` (optional, `[from, to)`); 404/400 as Problem Details | `@RestController`, record DTOs, `ErrorResponseException`, RFC 9457, `MockMvcTester` | ✅ Done |
 | 9  | Demo producer (`producer` profile): moving tracks + a duplicate, an out-of-order and two invalid messages | `@Profile`, `CommandLineRunner`, `KafkaTemplate`, `@ConfigurationProperties` record + `@Validated` | ✅ Done |
-| 10 | Stretch: stale tracks, health endpoint / consumer lag | `@Scheduled`, Actuator | ⬜ |
+| 10a | Stretch: stale tracks — `STALE` after 10 s, removed from the picture after 30 s (configurable), checked at startup and every 2 s | `@Scheduled`, `@EnableScheduling`, injectable `Clock`, `ApplicationContextRunner` | ✅ Done |
+| 10b | Stretch: health endpoint / consumer lag | Actuator | ⬜ |
 | 11 | README: how to run, architecture diagram, decisions, trade-offs, future work | — | ⬜ |
 
 ## Notes & Lessons Learned
@@ -123,3 +124,15 @@ Each step is small, reviewed, and committed before moving on.
   in which order) are plain classes with unit tests; `DemoProducer` only sends and sleeps.
 - **Two instances in the same consumer group share the partitions** (e.g. IntelliJ + a terminal
   run): each logs only its own partitions' outcomes, but the stored result is the same.
+
+- **Stale/dropped tracks**: a `@Scheduled` job marks tracks `STALE` (`status` column, Flyway V3)
+  and deletes dropped ones from the picture — history is kept. Age = now − latest *observation*
+  timestamp, so a replayed or backlogged feed doesn't look live. `fixedDelay` without initial delay
+  also runs at startup, catching tracks that expired while the service was down.
+- **Each expiry step is one SQL statement** (`UPDATE/DELETE ... WHERE observed_at < cutoff`): the
+  condition is re-checked on the row when it is written, so a concurrent upsert can't be overwritten.
+  `RETURNING track_id` (run as a query, not `@Modifying`) gives the ids for the log line.
+- **Updates already past drop-after go to history only** (outcome `STALE`): otherwise, with the row
+  deleted, nothing is left to compare with, and a late or replayed update would revive the track.
+- **Inject a `Clock`** instead of calling `Instant.now()`: tests fix the time. Full-app tests run on
+  the real clock, so their timestamps are relative to now.

@@ -44,6 +44,11 @@ public class TrackState {
     @Column(name = "last_received_at", nullable = false, insertable = false, updatable = false)
     private Instant lastReceivedAt;
 
+    /** Maintained by the database statements: reset by the upsert, set to STALE by the expiry job. */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16, insertable = false, updatable = false)
+    private TrackStatus status;
+
     protected TrackState() {
     }
 
@@ -77,5 +82,9 @@ public class TrackState {
 
     public Instant getLastReceivedAt() {
         return lastReceivedAt;
+    }
+
+    public TrackStatus getStatus() {
+        return status;
     }
 }

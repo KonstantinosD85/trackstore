@@ -1,12 +1,15 @@
 package dev.kostas.trackstore.ingest;
 
 import dev.kostas.trackstore.history.TrackHistoryRepository;
+import dev.kostas.trackstore.picture.PictureExpiryProperties;
 import dev.kostas.trackstore.picture.TrackStateRepository;
 import dev.kostas.trackstore.track.TrackUpdate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Clock;
 
 /**
  * Applies incoming track updates to history and the picture.
@@ -21,10 +24,15 @@ public class TrackUpdateService {
 
     private final TrackHistoryRepository history;
     private final TrackStateRepository picture;
+    private final PictureExpiryProperties expiry;
+    private final Clock clock;
 
-    public TrackUpdateService(TrackHistoryRepository history, TrackStateRepository picture) {
+    public TrackUpdateService(TrackHistoryRepository history, TrackStateRepository picture,
+                              PictureExpiryProperties expiry, Clock clock) {
         this.history = history;
         this.picture = picture;
+        this.expiry = expiry;
+        this.clock = clock;
     }
 
     /**
@@ -37,6 +45,14 @@ public class TrackUpdateService {
         if (!history.appendIfAbsent(update)) {
             log.debug("Duplicate update ignored: trackId={}, timestamp={}", update.trackId(), update.timestamp());
             return ProcessingOutcome.DUPLICATE;
+        }
+
+        // Already past drop-after: the picture would drop it right away. Keeping it out also means a
+        // dropped track (row deleted, nothing left to compare with) can't reappear with old data,
+        // and replaying an old topic doesn't refill the picture.
+        if (update.timestamp().isBefore(expiry.dropCutoff(clock.instant()))) {
+            log.debug("Expired update kept in history only: trackId={}, timestamp={}", update.trackId(), update.timestamp());
+            return ProcessingOutcome.STALE;
         }
 
         if (!picture.upsertIfNewer(update)) {

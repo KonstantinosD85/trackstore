@@ -11,7 +11,8 @@ import java.time.Instant;
  * table does. Field names follow the incoming track update ({@code timestamp}, not {@code observedAt}).
  *
  * @param timestamp      when the sensor observed the track (from the update)
- * @param lastReceivedAt when this service applied that update — useful for spotting stale tracks
+ * @param lastReceivedAt when this service applied that update
+ * @param status         {@code ACTIVE}, or {@code STALE} when no observation arrived for a while
  */
 public record TrackStateResponse(
         String trackId,
@@ -21,7 +22,8 @@ public record TrackStateResponse(
         Double altitude,
         Double heading,
         Identity identity,
-        Instant lastReceivedAt) {
+        Instant lastReceivedAt,
+        TrackStatus status) {
 
     static TrackStateResponse from(TrackState state) {
         return new TrackStateResponse(
@@ -32,6 +34,7 @@ public record TrackStateResponse(
                 state.getAltitude(),
                 state.getHeading(),
                 state.getIdentity(),
-                state.getLastReceivedAt());
+                state.getLastReceivedAt(),
+                state.getStatus());
     }
 }

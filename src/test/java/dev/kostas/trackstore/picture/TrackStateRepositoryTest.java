@@ -3,6 +3,8 @@ package dev.kostas.trackstore.picture;
 import dev.kostas.trackstore.TestcontainersConfiguration;
 import dev.kostas.trackstore.track.Identity;
 import dev.kostas.trackstore.track.TrackUpdate;
+import jakarta.persistence.EntityManager;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -24,6 +26,9 @@ class TrackStateRepositoryTest {
 
     @Autowired
     private TrackStateRepository repository;
+
+    @Autowired
+    private EntityManager entityManager;
 
     @Test
     void firstUpdateOfUnknownTrackBecomesItsState() {
@@ -131,5 +136,77 @@ class TrackStateRepositoryTest {
         assertThat(changed).isTrue();
         assertThat(repository.findAll()).extracting(TrackState::getTrackId)
                 .containsExactlyInAnyOrder("TRK-1", "TRK-2");
+    }
+
+    @Nested
+    class Expiry {
+
+        @Test
+        void newTrackStartsActive() {
+            repository.upsertIfNewer(aTrackUpdate().trackId("TRK-1").timestamp(T0).build());
+
+            assertThat(reload("TRK-1").getStatus()).isEqualTo(TrackStatus.ACTIVE);
+        }
+
+        @Test
+        void marksOnlyActiveTracksObservedBeforeCutoff() {
+            repository.upsertIfNewer(aTrackUpdate().trackId("OLD").timestamp(T0).build());
+            repository.upsertIfNewer(aTrackUpdate().trackId("RECENT").timestamp(T0.plusSeconds(20)).build());
+
+            assertThat(repository.markStaleIfObservedBefore(T0.plusSeconds(10))).containsExactly("OLD");
+            // Already stale: not reported again.
+            assertThat(repository.markStaleIfObservedBefore(T0.plusSeconds(10))).isEmpty();
+
+            assertThat(reload("OLD").getStatus()).isEqualTo(TrackStatus.STALE);
+            assertThat(reload("RECENT").getStatus()).isEqualTo(TrackStatus.ACTIVE);
+        }
+
+        @Test
+        void newerUpdateMakesStaleTrackActiveAgain() {
+            repository.upsertIfNewer(aTrackUpdate().trackId("TRK-1").timestamp(T0).build());
+            repository.markStaleIfObservedBefore(T0.plusSeconds(10));
+
+            repository.upsertIfNewer(aTrackUpdate().trackId("TRK-1").timestamp(T0.plusSeconds(15)).build());
+
+            assertThat(reload("TRK-1").getStatus()).isEqualTo(TrackStatus.ACTIVE);
+        }
+
+        @Test
+        void olderUpdateDoesNotReviveStaleTrack() {
+            repository.upsertIfNewer(aTrackUpdate().trackId("TRK-1").timestamp(T0.plusSeconds(5)).build());
+            repository.markStaleIfObservedBefore(T0.plusSeconds(10));
+
+            repository.upsertIfNewer(aTrackUpdate().trackId("TRK-1").timestamp(T0).build());   // out of order
+
+            assertThat(reload("TRK-1").getStatus()).isEqualTo(TrackStatus.STALE);
+        }
+
+        @Test
+        void deletesTracksObservedBeforeCutoff() {
+            repository.upsertIfNewer(aTrackUpdate().trackId("OLD").timestamp(T0).build());
+            repository.upsertIfNewer(aTrackUpdate().trackId("RECENT").timestamp(T0.plusSeconds(20)).build());
+
+            assertThat(repository.deleteObservedBefore(T0.plusSeconds(10))).containsExactly("OLD");
+
+            entityManager.clear();
+            assertThat(repository.findAll()).extracting(TrackState::getTrackId).containsExactly("RECENT");
+        }
+
+        @Test
+        void droppedTrackComesBackWithANewObservation() {
+            repository.upsertIfNewer(aTrackUpdate().trackId("TRK-1").timestamp(T0).build());
+            repository.deleteObservedBefore(T0.plusSeconds(10));
+
+            boolean changed = repository.upsertIfNewer(aTrackUpdate().trackId("TRK-1").timestamp(T0.plusSeconds(60)).build());
+
+            assertThat(changed).isTrue();
+            assertThat(reload("TRK-1").getStatus()).isEqualTo(TrackStatus.ACTIVE);
+        }
+
+        /** The native statements bypass the persistence context; read the row fresh from the database. */
+        private TrackState reload(String trackId) {
+            entityManager.clear();
+            return repository.findById(trackId).orElseThrow();
+        }
     }
 }

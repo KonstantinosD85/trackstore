@@ -6,6 +6,7 @@ import dev.kostas.trackstore.history.TrackHistoryEntry;
 import dev.kostas.trackstore.history.TrackHistoryRepository;
 import dev.kostas.trackstore.picture.TrackState;
 import dev.kostas.trackstore.picture.TrackStateRepository;
+import dev.kostas.trackstore.picture.TrackStatus;
 import dev.kostas.trackstore.track.Identity;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -24,6 +25,7 @@ import org.springframework.kafka.support.KafkaHeaders;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
@@ -44,7 +46,11 @@ import static org.awaitility.Awaitility.await;
 @Import({TestcontainersConfiguration.class, KafkaTestcontainersConfiguration.class})
 class TrackUpdateListenerIntegrationTest {
 
-    private static final Instant T0 = Instant.parse("2026-01-01T12:00:00Z");
+    /**
+     * Recent, because the full application runs on the real clock: an update older than
+     * {@code drop-after} would (correctly) be kept out of the picture. Per test instance.
+     */
+    private final Instant t0 = Instant.now().truncatedTo(ChronoUnit.SECONDS);
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
 
     @Autowired
@@ -78,11 +84,11 @@ class TrackUpdateListenerIntegrationTest {
 
     @Test
     void validUpdateReachesPictureAndHistory() {
-        publish(update(T0, 37.5, "HOSTILE"));
+        publish(update(t0, 37.5, "HOSTILE"));
 
         await().atMost(TIMEOUT).untilAsserted(() -> {
             TrackState state = picture.findById(trackId).orElseThrow();
-            assertThat(state.getObservedAt()).isEqualTo(T0);
+            assertThat(state.getObservedAt()).isEqualTo(t0);
             assertThat(state.getLatitude()).isEqualTo(37.5);
             assertThat(state.getIdentity()).isEqualTo(Identity.HOSTILE);
         });
@@ -91,10 +97,10 @@ class TrackUpdateListenerIntegrationTest {
 
     @Test
     void outOfOrderAndDuplicateUpdatesEndInLatestPictureAndCompleteHistory() {
-        publish(update(T0, 10.0, "FRIEND"));
-        publish(update(T0.plusSeconds(2), 12.0, "FRIEND"));
-        publish(update(T0.plusSeconds(1), 11.0, "FRIEND"));   // out of order
-        publish(update(T0.plusSeconds(2), 12.0, "FRIEND"));   // duplicate
+        publish(update(t0, 10.0, "FRIEND"));
+        publish(update(t0.plusSeconds(2), 12.0, "FRIEND"));
+        publish(update(t0.plusSeconds(1), 11.0, "FRIEND"));   // out of order
+        publish(update(t0.plusSeconds(2), 12.0, "FRIEND"));   // duplicate
 
         // Barrier: same key → same partition → processed after everything above.
         // Once it shows up in the DLT, all four updates have been processed.
@@ -102,15 +108,15 @@ class TrackUpdateListenerIntegrationTest {
         awaitDeadLetter();
 
         TrackState state = picture.findById(trackId).orElseThrow();
-        assertThat(state.getObservedAt()).isEqualTo(T0.plusSeconds(2));
+        assertThat(state.getObservedAt()).isEqualTo(t0.plusSeconds(2));
         assertThat(state.getLatitude()).isEqualTo(12.0);
         assertThat(historyOfTrack()).extracting(TrackHistoryEntry::getObservedAt)
-                .containsExactly(T0, T0.plusSeconds(1), T0.plusSeconds(2));
+                .containsExactly(t0, t0.plusSeconds(1), t0.plusSeconds(2));
     }
 
     @Test
     void invalidValuesAreDeadLetteredWithOriginalPayloadAndNeverStored() {
-        String payload = update(T0, 91.0, "FRIEND");   // latitude out of range
+        String payload = update(t0, 91.0, "FRIEND");   // latitude out of range
 
         publish(payload);
 
@@ -122,7 +128,7 @@ class TrackUpdateListenerIntegrationTest {
 
     @Test
     void unknownIdentityIsDeadLetteredAsUnparseable() {
-        String payload = update(T0, 37.5, "ENEMY");
+        String payload = update(t0, 37.5, "ENEMY");
 
         publish(payload);
 
@@ -150,6 +156,25 @@ class TrackUpdateListenerIntegrationTest {
 
         assertThat(awaitDeadLetter().value()).isEqualTo("{ this is not json");
         assertNothingStored();
+    }
+
+    @Test
+    void quietTrackIsMarkedStaleByTheScheduledJob() {
+        publish(update(t0.minusSeconds(12), 37.5, "FRIEND"));   // older than stale-after (10 s)
+
+        // Applied as ACTIVE; the expiry job (every 2 s in the running app) then marks it STALE.
+        await().atMost(TIMEOUT).untilAsserted(() ->
+                assertThat(picture.findById(trackId).orElseThrow().getStatus()).isEqualTo(TrackStatus.STALE));
+    }
+
+    @Test
+    void updateAlreadyPastDropAfterIsKeptInHistoryOnly() {
+        publish(update(t0.minusSeconds(60), 37.5, "FRIEND"));   // older than drop-after (30 s)
+        publish("not json");                                    // barrier, see above
+        awaitDeadLetter();
+
+        assertThat(picture.findById(trackId)).isEmpty();
+        assertThat(historyOfTrack()).hasSize(1);
     }
 
     // --- helpers -------------------------------------------------------------------------------
@@ -186,7 +211,7 @@ class TrackUpdateListenerIntegrationTest {
     }
 
     private List<TrackHistoryEntry> historyOfTrack() {
-        return history.findHistory(trackId, Instant.EPOCH, T0.plusSeconds(3600));
+        return history.findHistory(trackId, null, null);
     }
 
     /** Safe right after {@link #awaitDeadLetter()}: the rejected record has been fully handled by then. */

@@ -3,15 +3,21 @@ package dev.kostas.trackstore.ingest;
 import dev.kostas.trackstore.TestcontainersConfiguration;
 import dev.kostas.trackstore.history.TrackHistoryEntry;
 import dev.kostas.trackstore.history.TrackHistoryRepository;
+import dev.kostas.trackstore.picture.PictureExpiryProperties;
 import dev.kostas.trackstore.picture.TrackState;
 import dev.kostas.trackstore.picture.TrackStateRepository;
 import dev.kostas.trackstore.track.TrackUpdate;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 
 import static dev.kostas.trackstore.track.TrackUpdateFixtures.aTrackUpdate;
@@ -21,13 +27,28 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The service wired to the real repositories and a real PostgreSQL: checks that a realistic
  * stream — with a duplicate and an out-of-order update — ends in the right picture and history.
  * <p>
- * {@link DataJpaTest} only loads the JPA slice, so the service is added explicitly.
+ * {@link DataJpaTest} only loads the JPA slice, so the service and its collaborators
+ * (expiry settings, a fixed clock) are added explicitly.
  */
 @DataJpaTest
-@Import({TestcontainersConfiguration.class, TrackUpdateService.class})
+@Import({TestcontainersConfiguration.class, TrackUpdateService.class, TrackUpdateServiceIntegrationTest.FixedTime.class})
 class TrackUpdateServiceIntegrationTest {
 
     private static final Instant T0 = Instant.parse("2026-01-01T12:00:00Z");
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class FixedTime {
+
+        @Bean
+        Clock clock() {
+            return Clock.fixed(T0.plusSeconds(5), ZoneOffset.UTC);
+        }
+
+        @Bean
+        PictureExpiryProperties pictureExpiryProperties() {
+            return new PictureExpiryProperties(Duration.ofSeconds(10), Duration.ofSeconds(30), Duration.ofSeconds(2));
+        }
+    }
 
     @Autowired
     private TrackUpdateService service;

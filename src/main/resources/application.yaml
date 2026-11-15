@@ -23,3 +23,10 @@ spring:
     # Error responses (404, 400, ...) as RFC 9457 "application/problem+json" bodies.
     problemdetails:
       enabled: true
+
+trackstore:
+  picture:
+    # Ages are measured from the track's latest observation timestamp (see PictureExpiryJob).
+    stale-after: 10s      # no observation for this long → status STALE
+    drop-after: 30s       # no observation for this long → removed from the picture (history is kept)
+    check-interval: 2s    # how often the expiry job runs (also once at startup)

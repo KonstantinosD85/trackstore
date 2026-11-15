@@ -1,13 +1,19 @@
 package dev.kostas.trackstore.ingest;
 
 import dev.kostas.trackstore.history.TrackHistoryRepository;
+import dev.kostas.trackstore.picture.PictureExpiryProperties;
 import dev.kostas.trackstore.picture.TrackStateRepository;
 import dev.kostas.trackstore.track.TrackUpdate;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 
 import static dev.kostas.trackstore.track.TrackUpdateFixtures.aTrackUpdate;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -28,8 +34,16 @@ class TrackUpdateServiceTest {
     @Mock
     private TrackStateRepository picture;
 
-    @InjectMocks
     private TrackUpdateService service;
+
+    /** "Now" for the service: 10 s after the fixtures' default timestamp. */
+    private static final Instant NOW = aTrackUpdate().build().timestamp().plusSeconds(10);
+
+    @BeforeEach
+    void createService() {
+        var expiry = new PictureExpiryProperties(Duration.ofSeconds(10), Duration.ofSeconds(30), Duration.ofSeconds(2));
+        service = new TrackUpdateService(history, picture, expiry, Clock.fixed(NOW, ZoneOffset.UTC));
+    }
 
     @Test
     void newLatestUpdateIsApplied() {
@@ -55,6 +69,16 @@ class TrackUpdateServiceTest {
         when(history.appendIfAbsent(update)).thenReturn(false);
 
         assertThat(service.process(update)).isEqualTo(ProcessingOutcome.DUPLICATE);
+        verify(picture, never()).upsertIfNewer(any(TrackUpdate.class));
+    }
+
+    @Test
+    void updateAlreadyPastDropAfterGoesToHistoryOnly() {
+        TrackUpdate update = aTrackUpdate().timestamp(NOW.minusSeconds(31)).build();
+        when(history.appendIfAbsent(update)).thenReturn(true);
+
+        assertThat(service.process(update)).isEqualTo(ProcessingOutcome.STALE);
+        verify(history).appendIfAbsent(update);
         verify(picture, never()).upsertIfNewer(any(TrackUpdate.class));
     }
 }
