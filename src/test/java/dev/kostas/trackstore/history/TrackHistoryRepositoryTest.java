@@ -151,8 +151,29 @@ class TrackHistoryRepositoryTest {
             assertThat(repository.findHistory("NOPE", Instant.EPOCH, T0)).isEmpty();
         }
 
+        @Test
+        void missingBoundsMeanUnbounded() {
+            appendAt("TRK-1", T0.minusSeconds(10));
+            appendAt("TRK-1", T0);
+            appendAt("TRK-1", T0.plusSeconds(10));
+
+            assertThat(repository.findHistory("TRK-1", null, null)).hasSize(3);
+            assertThat(repository.findHistory("TRK-1", T0, null)).extracting(TrackHistoryEntry::getObservedAt)
+                    .containsExactly(T0, T0.plusSeconds(10));
+            assertThat(repository.findHistory("TRK-1", null, T0)).extracting(TrackHistoryEntry::getObservedAt)
+                    .containsExactly(T0.minusSeconds(10));
+        }
+
         private void appendAt(String trackId, Instant timestamp) {
             repository.appendIfAbsent(aTrackUpdate().trackId(trackId).timestamp(timestamp).build());
         }
+    }
+
+    @Test
+    void existsByTrackIdTellsKnownFromUnknownTracks() {
+        repository.appendIfAbsent(aTrackUpdate().trackId("TRK-1").build());
+
+        assertThat(repository.existsByTrackId("TRK-1")).isTrue();
+        assertThat(repository.existsByTrackId("NOPE")).isFalse();
     }
 }

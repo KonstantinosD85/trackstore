@@ -19,3 +19,7 @@ spring:
       ddl-auto: validate
     # We have no lazy-loading in web views; keep DB sessions out of HTTP requests.
     open-in-view: false
+  mvc:
+    # Error responses (404, 400, ...) as RFC 9457 "application/problem+json" bodies.
+    problemdetails:
+      enabled: true

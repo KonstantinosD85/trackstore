@@ -50,7 +50,7 @@ Each step is small, reviewed, and committed before moving on.
 | 6  | `TrackUpdateService` (history → picture, one transaction) + unit & integration tests | `@Service`, constructor injection, `@Transactional`, Mockito | ✅ Done |
 | 7a | Kafka listener: `@Payload @Valid`, JSON conversion, rejected → log line + `track-updates-dlt`, retry policy; live demo | `@KafkaListener`, `KafkaListenerConfigurer`, `DefaultErrorHandler`, `DeadLetterPublishingRecoverer` | ✅ Done |
 | 7b | Listener tests on real Kafka: valid/duplicate/out-of-order, invalid values, unparseable JSON (e.g. `"identity": "ENEMY"`) → DLT | Testcontainers Kafka, `@SpringBootTest`, Awaitility | ✅ Done |
-| 8  | REST API for the three endpoints | `@RestController`, DTOs, 404 handling | ⬜ |
+| 8  | REST API: `GET /picture`, `GET /tracks/{id}`, `GET /tracks/{id}/history?from&to` (optional, `[from, to)`); 404/400 as Problem Details | `@RestController`, record DTOs, `ErrorResponseException`, RFC 9457, `MockMvcTester` | ✅ Done |
 | 9  | Producer (moving tracks + duplicate, out-of-order, invalid messages) | `CommandLineRunner` or script | ⬜ |
 | 10 | Stretch: stale tracks, health endpoint / consumer lag | `@Scheduled`, Actuator | ⬜ |
 | 11 | README: how to run, architecture diagram, decisions, trade-offs, future work | — | ⬜ |
@@ -103,3 +103,15 @@ Each step is small, reviewed, and committed before moving on.
   the developer's local topic.
 - **Native `@Modifying` queries bypass the persistence context** — `clearAutomatically = true`
   evicts cached entities so a later `findById` in the same transaction doesn't return stale data.
+- **Read API returns DTOs, not entities** (`TrackStateResponse`, `TrackHistoryEntryResponse`): the
+  JSON contract is independent of the table layout and uses the producer's field name `timestamp`.
+- **Errors as RFC 9457 Problem Details** (`spring.mvc.problemdetails.enabled`): an exception that
+  *is* an `ErrorResponse` (`TrackNotFoundException`, `ResponseStatusException`) or a bad parameter
+  (`from=yesterday`) becomes `application/problem+json` without any handler code.
+- **History filters are optional** and half-open `[from, to)`, so consecutive windows never overlap.
+  Unknown track → 404; known track with an empty window → `200 []`. `from > to` → 400.
+- **PostgreSQL can't type `:param is null`** ("could not determine data type of parameter"), so
+  missing bounds are replaced by far-past/far-future instants in Java instead of in the query.
+- **Controller tests with `@SpringBootTest` + MockMvc + `@Transactional`**: MockMvc runs the request
+  in the test thread, so test data and request share one transaction that is rolled back.
+  Future work: pagination/limit for long histories.

@@ -49,9 +49,22 @@ public interface TrackHistoryRepository extends JpaRepository<TrackHistoryEntry,
                                  Double heading,
                                  String identity);
 
+    /** Stand-ins for "no bound"; both lie within PostgreSQL's TIMESTAMPTZ range. */
+    Instant EARLIEST = Instant.parse("0001-01-01T00:00:00Z");
+    Instant LATEST = Instant.parse("9999-12-31T23:59:59Z");
+
     /**
      * History of one track in chronological order, within {@code [from, to)}.
+     * Both bounds are optional: {@code null} means "no lower bound" / "no upper bound".
+     * <p>
+     * The defaults are resolved here rather than with {@code :from is null or ...} in the query:
+     * PostgreSQL cannot infer the type of a parameter that is only compared with null, and a plain
+     * range keeps the query simple for the {@code (track_id, observed_at)} index.
      */
+    default List<TrackHistoryEntry> findHistory(String trackId, Instant from, Instant to) {
+        return findHistoryBetween(trackId, from != null ? from : EARLIEST, to != null ? to : LATEST);
+    }
+
     @Query("""
             select h from TrackHistoryEntry h
             where h.trackId = :trackId
@@ -59,5 +72,8 @@ public interface TrackHistoryRepository extends JpaRepository<TrackHistoryEntry,
               and h.observedAt < :to
             order by h.observedAt
             """)
-    List<TrackHistoryEntry> findHistory(String trackId, Instant from, Instant to);
+    List<TrackHistoryEntry> findHistoryBetween(String trackId, Instant from, Instant to);
+
+    /** Derived query: Spring Data generates it from the method name. */
+    boolean existsByTrackId(String trackId);
 }
