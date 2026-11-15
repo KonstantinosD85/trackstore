@@ -46,7 +46,7 @@ Each step is small, reviewed, and committed before moving on.
 | 3  | Unit tests for validation | JUnit 5, AssertJ | ✅ Done |
 | 4a | History storage: Flyway schema, entity, repository, unique constraint | Flyway, JPA, Spring Data repositories | ✅ Done |
 | 4b | History repository tests against real Postgres (append, duplicate, range query) | Testcontainers, `@DataJpaTest`, `@ServiceConnection` | ✅ Done |
-| 5  | Picture storage with "newer timestamp wins" upsert | `@Modifying` queries, `@Transactional` | ⬜ |
+| 5  | Picture storage with "newer timestamp wins" upsert + repository tests | `@Modifying` native queries, persistence context | ✅ Done |
 | 6  | `TrackUpdateService` + ordering/idempotency tests | Service layer, `@DataJpaTest` | ⬜ |
 | 7  | Kafka consumer: JSON parsing, invalid → log + dead-letter topic (incl. tests for unparseable JSON, e.g. `"identity": "ENEMY"`, bad timestamp) | `@KafkaListener`, error handlers | ⬜ |
 | 8  | REST API for the three endpoints | `@RestController`, DTOs, 404 handling | ⬜ |
@@ -64,6 +64,10 @@ Each step is small, reviewed, and committed before moving on.
 - Kafka clients connect to the bootstrap address, then reconnect to the broker's *advertised*
   listener. With the same port inside and outside the container (`9092:9092`), the default
   `localhost:9092` works from both sides.
+- Postgres is published on a **fixed host port** (`5432:5432`) so DBeaver/psql can connect.
+  With the default lifecycle (`start-and-stop`) the containers stop when the app stops. To keep
+  the DB up independently, run `docker compose up -d` first: if the services are already running,
+  Spring Boot neither starts nor stops them. Stop them with `docker compose stop` / `down`.
 - **Flyway is SQL-first**: migrations are hand-written `V<n>__<name>.sql` files, applied once and
   recorded (with a checksum) in `flyway_schema_history`. Never edit an applied migration — add a
   new one. Hibernate runs with `ddl-auto: validate` as a safety net: the app fails at startup if
@@ -73,3 +77,10 @@ Each step is small, reviewed, and committed before moving on.
   violation marks the whole transaction rollback-only, which would also undo the picture update.
 - **Validation must mirror DB constraints** (`@Size(max = 64)` ↔ `VARCHAR(64)`); otherwise a message
   passes validation, fails on insert, and becomes a poison message that blocks its partition.
+- **"Newer wins" is one atomic SQL statement** (`ON CONFLICT DO UPDATE ... WHERE stored < incoming`),
+  not read → compare in Java → save, which has a lost-update race between concurrent writers.
+  Strictly newer (`<`): an equal timestamp is the same observation → ignored, first version wins.
+- **A newer update replaces the whole state**; missing optional fields become `null` rather than
+  keeping stale values from an older observation.
+- **Native `@Modifying` queries bypass the persistence context** — `clearAutomatically = true`
+  evicts cached entities so a later `findById` in the same transaction doesn't return stale data.

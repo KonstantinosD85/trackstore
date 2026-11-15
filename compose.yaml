@@ -6,7 +6,7 @@ services:
       - 'POSTGRES_PASSWORD=secret'
       - 'POSTGRES_USER=trackstore'
     ports:
-      - '5432'   # random host port; Spring Boot discovers it automatically
+      - '5432:5432'   # fixed host port so DB tools (DBeaver, psql) can connect
 
   kafka:
     # Single-node Kafka in KRaft mode (no ZooKeeper). The image's default config
