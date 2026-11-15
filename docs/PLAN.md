@@ -51,7 +51,7 @@ Each step is small, reviewed, and committed before moving on.
 | 7a | Kafka listener: `@Payload @Valid`, JSON conversion, rejected → log line + `track-updates-dlt`, retry policy; live demo | `@KafkaListener`, `KafkaListenerConfigurer`, `DefaultErrorHandler`, `DeadLetterPublishingRecoverer` | ✅ Done |
 | 7b | Listener tests on real Kafka: valid/duplicate/out-of-order, invalid values, unparseable JSON (e.g. `"identity": "ENEMY"`) → DLT | Testcontainers Kafka, `@SpringBootTest`, Awaitility | ✅ Done |
 | 8  | REST API: `GET /picture`, `GET /tracks/{id}`, `GET /tracks/{id}/history?from&to` (optional, `[from, to)`); 404/400 as Problem Details | `@RestController`, record DTOs, `ErrorResponseException`, RFC 9457, `MockMvcTester` | ✅ Done |
-| 9  | Producer (moving tracks + duplicate, out-of-order, invalid messages) | `CommandLineRunner` or script | ⬜ |
+| 9  | Demo producer (`producer` profile): moving tracks + a duplicate, an out-of-order and two invalid messages | `@Profile`, `CommandLineRunner`, `KafkaTemplate`, `@ConfigurationProperties` record + `@Validated` | ✅ Done |
 | 10 | Stretch: stale tracks, health endpoint / consumer lag | `@Scheduled`, Actuator | ⬜ |
 | 11 | README: how to run, architecture diagram, decisions, trade-offs, future work | — | ⬜ |
 
@@ -115,3 +115,11 @@ Each step is small, reviewed, and committed before moving on.
 - **Controller tests with `@SpringBootTest` + MockMvc + `@Transactional`**: MockMvc runs the request
   in the test thread, so test data and request share one transaction that is rolled back.
   Future work: pagination/limit for long histories.
+- **The demo producer is a Spring profile** (`./mvnw spring-boot:run -Dspring-boot.run.profiles=producer`):
+  `@Profile("producer")` beans exist only then, and `application-producer.yaml` is loaded on top of
+  `application.yaml`. It talks to Kafka only via `KafkaTemplate` with raw JSON, like an external
+  sensor. Trade-off: it runs in the service's JVM — fine for a demo, a real feed is separate.
+- **Logic is pure, I/O is thin**: `TrackSimulator` (positions) and `DemoScenario` (which messages,
+  in which order) are plain classes with unit tests; `DemoProducer` only sends and sleeps.
+- **Two instances in the same consumer group share the partitions** (e.g. IntelliJ + a terminal
+  run): each logs only its own partitions' outcomes, but the stored result is the same.
