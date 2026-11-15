@@ -47,8 +47,9 @@ Each step is small, reviewed, and committed before moving on.
 | 4a | History storage: Flyway schema, entity, repository, unique constraint | Flyway, JPA, Spring Data repositories | ✅ Done |
 | 4b | History repository tests against real Postgres (append, duplicate, range query) | Testcontainers, `@DataJpaTest`, `@ServiceConnection` | ✅ Done |
 | 5  | Picture storage with "newer timestamp wins" upsert + repository tests | `@Modifying` native queries, persistence context | ✅ Done |
-| 6  | `TrackUpdateService` + ordering/idempotency tests | Service layer, `@DataJpaTest` | ⬜ |
-| 7  | Kafka consumer: JSON parsing, invalid → log + dead-letter topic (incl. tests for unparseable JSON, e.g. `"identity": "ENEMY"`, bad timestamp) | `@KafkaListener`, error handlers | ⬜ |
+| 6  | `TrackUpdateService` (history → picture, one transaction) + unit & integration tests | `@Service`, constructor injection, `@Transactional`, Mockito | ✅ Done |
+| 7a | Kafka listener: `@Payload @Valid`, JSON conversion, rejected → log line + `track-updates-dlt`, retry policy; live demo | `@KafkaListener`, `KafkaListenerConfigurer`, `DefaultErrorHandler`, `DeadLetterPublishingRecoverer` | ✅ Done |
+| 7b | Listener tests on real Kafka: valid/duplicate/out-of-order, invalid values, unparseable JSON (e.g. `"identity": "ENEMY"`) → DLT | Testcontainers Kafka, `@SpringBootTest` | ⬜ |
 | 8  | REST API for the three endpoints | `@RestController`, DTOs, 404 handling | ⬜ |
 | 9  | Producer (moving tracks + duplicate, out-of-order, invalid messages) | `CommandLineRunner` or script | ⬜ |
 | 10 | Stretch: stale tracks, health endpoint / consumer lag | `@Scheduled`, Actuator | ⬜ |
@@ -82,5 +83,23 @@ Each step is small, reviewed, and committed before moving on.
   Strictly newer (`<`): an equal timestamp is the same observation → ignored, first version wins.
 - **A newer update replaces the whole state**; missing optional fields become `null` rather than
   keeping stale values from an older observation.
+- **History and picture are written in one transaction**, so "in history" ⇒ "applied to picture".
+  History is therefore the duplicate check: a duplicate never reaches the picture. Outcomes:
+  `APPLIED` (history + picture), `STALE` (out of order → history only), `DUPLICATE` (nothing).
+  Trade-off: couples the two stores; if split into separate services, each would consume the topic
+  in its own consumer group and rely on its own idempotent write (which both already have).
+- **Validation happens at the listener** (`@Payload @Valid`, enabled via `KafkaListenerConfigurer`),
+  since Kafka is the only entry point. Trade-off: a future second entry point (e.g. REST ingest)
+  would have to validate too; the service itself trusts its input.
+- **Consume as String, convert at the listener** (`StringJacksonJsonMessageConverter`): the record
+  keeps the original text, so the DLT receives exactly what the producer sent, for every kind of
+  rejection (unparseable JSON, unknown enum, invalid values). Spring adds `kafka_dlt-*` headers
+  with the exception class and message.
+- **Retry policy**: conversion/validation failures are non-retryable by default in Spring Kafka →
+  straight to log + DLT. Any other failure (e.g. DB down) is retried with exponential back-off and
+  no limit: valid data is never dropped, and the blocked partition preserves per-track ordering.
+  Trade-off: a bug that fails a valid record forever stalls its partition (visible via lag).
+- Tests that start the full app get their **own Kafka container**, so they never consume from
+  the developer's local topic.
 - **Native `@Modifying` queries bypass the persistence context** — `clearAutomatically = true`
   evicts cached entities so a later `findById` in the same transaction doesn't return stale data.

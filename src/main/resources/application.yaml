@@ -3,6 +3,15 @@ spring:
     name: trackstore
   kafka:
     bootstrap-servers: localhost:9092
+    consumer:
+      group-id: trackstore
+      # A new consumer group starts from the beginning of the topic, not only new messages.
+      auto-offset-reset: earliest
+      # Key and value are read as plain strings (Spring Boot's default deserializers);
+      # the JSON → TrackUpdate conversion happens at the listener (see KafkaConfig).
+    listener:
+      # One consumer thread per partition. Each partition is still consumed in order.
+      concurrency: 3
   jpa:
     # Flyway owns the schema (src/main/resources/db/migration); Hibernate only checks
     # at startup that the entities match the tables, and fails fast if they don't.
