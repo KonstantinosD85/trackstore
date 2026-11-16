@@ -1,6 +1,12 @@
 spring:
   application:
     name: trackstore
+  # Defaults for local development against compose.yaml. Elsewhere, override them with environment
+  # variables (SPRING_DATASOURCE_URL, SPRING_DATASOURCE_PASSWORD, SPRING_KAFKA_BOOTSTRAP_SERVERS, ...).
+  datasource:
+    url: jdbc:postgresql://localhost:5432/trackstore
+    username: trackstore
+    password: secret   # local development only
   kafka:
     bootstrap-servers: localhost:9092
     consumer:
@@ -12,6 +18,9 @@ spring:
     listener:
       # One consumer thread per partition. Each partition is still consumed in order.
       concurrency: 3
+      # The topics are created by the infrastructure (compose.yaml), not by this service.
+      # If one is missing, refuse to start instead of waiting silently.
+      missing-topics-fatal: true
   jpa:
     # Flyway owns the schema (src/main/resources/db/migration); Hibernate only checks
     # at startup that the entities match the tables, and fails fast if they don't.

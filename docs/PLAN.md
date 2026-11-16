@@ -7,7 +7,8 @@ Each step is small, reviewed, and committed before moving on.
 
 - Java 21, Spring Boot 4.1 (Web MVC, Spring Data JPA, Spring for Apache Kafka)
 - PostgreSQL 17 and Apache Kafka 4.1 (KRaft, single node) via Docker Compose
-- Run locally with `./mvnw spring-boot:run` — Spring Boot starts the Compose services automatically
+- Run locally: `docker compose up -d --wait` (infrastructure + topics), then the service with
+  `./mvnw spring-boot:run` or `java -jar target/trackstore-0.0.1-SNAPSHOT.jar`
 
 ## Target Design
 
@@ -55,21 +56,88 @@ Each step is small, reviewed, and committed before moving on.
 | 10a | Stretch: stale tracks — `STALE` after 10 s, removed from the picture after 30 s (configurable), checked at startup and every 2 s | `@Scheduled`, `@EnableScheduling`, injectable `Clock`, `ApplicationContextRunner` | ✅ Done |
 | 10b | Stretch: `/health` with a `consumerLag` component (lag per partition for the whole group), `/metrics` | Actuator, custom `HealthIndicator`, Kafka `Admin`, Micrometer | ✅ Done |
 | 11 | README: how to run, architecture diagram, decisions, trade-offs, future work | — | ⬜ |
+| 12 | Run without Spring Boot's Docker Compose support: explicit DB config, topics created by Compose, fail fast on missing topics (see below) | Externalized config, `missing-topics-fatal`, Compose healthchecks | ✅ Done |
+| 13 | Demo producer as its own plain-Java application, run independently of the service (see below) | — (plain Java: `KafkaProducer`, shutdown hook) | ⬜ |
+
+Order: 12 → 13 → 11. The README is written last, so it describes the final way to run everything.
+
+### Step 12 — Run the service independently of Docker Compose
+
+Today `application.yaml` has no database URL — it comes only from the Compose service connection,
+so `java -jar` fails. Decisions: the app stays outside Docker (no app container), and Compose
+creates **both** topics.
+
+1. **Explicit config**: `spring.datasource.url/username/password` with local defaults (dev-only
+   credentials), overridable via env vars (`SPRING_DATASOURCE_URL`, `SPRING_KAFKA_BOOTSTRAP_SERVERS`).
+   Remove the `spring-boot-docker-compose` dependency.
+2. **Topics owned by infrastructure**: a one-shot `kafka-init` service in `compose.yaml`
+   (`depends_on` Kafka *healthy*) runs `kafka-topics.sh --create --if-not-exists` for
+   `track-updates` (3 partitions) and `track-updates-dlt`. Remove the `NewTopic` beans.
+3. **Fail loudly on a missing topic**: broker `auto.create.topics.enable=false` (else a 1-partition
+   topic appears silently); app `spring.kafka.listener.missing-topics-fatal: true`.
+4. **Tests**: Testcontainers is unaffected, but relied on the `NewTopic` beans → move them into
+   `KafkaTestcontainersConfiguration` (topic setup now exists in Compose and in tests).
+5. **Healthchecks** for Postgres (`pg_isready`) and Kafka; start with `docker compose up -d --wait`.
+6. **Named volume** for Postgres, so `docker compose down` keeps the data.
+7. Update run instructions (Stack section, README, IntelliJ run configuration).
+
+Risks: setting any `KAFKA_*` env var disables the `apache/kafka` image's defaults → the full KRaft
+config must be given (node id, roles, listeners, controller quorum, advertised listeners). With
+`missing-topics-fatal`, the app crashes if started before `kafka-init` ran; and nothing waits for
+Postgres any more — both are deliberate fail-fast behaviour, to be documented.
+
+### Step 13 — Producer as an independent application
+
+Problem: the producer is a `CommandLineRunner` inside the service (`producer` profile). Runners
+execute *before* the application is ready, so the service reports not-ready (`readinessState`)
+until the whole demo has been published, and the producer can't run without the service.
+
+Decisions: a **standalone project** next to the service (not a multi-module build), written in
+**plain Java** with the Kafka client (no Spring).
+
+1. **New standalone project `producer/`** with its own `pom.xml` (`dev.kostas.trackproducer`):
+   `kafka-clients`, Jackson for JSON, SLF4J for logging; packaged as a runnable jar. The service's
+   build is untouched.
+2. **Plain Java**: a `main` that reads settings from command-line arguments with environment
+   variable fallbacks (bootstrap servers, tracks, ticks, interval) and publishes with a
+   `KafkaProducer<String, String>` (key = trackId, `acks=all`, idempotence on).
+3. **Run modes**: a fixed number of ticks, then exit with code 0; or `ticks: 0` = run until
+   Ctrl+C (a shutdown hook flushes and closes the producer) — useful to watch tracks go STALE and
+   get dropped once the producer is stopped.
+4. **Own message type**: the producer has its own `TrackUpdateMessage` record instead of importing
+   the service's `TrackUpdate`. The JSON is the contract between them, like a real external sensor;
+   the topic name is duplicated too. Trade-off: the contract is copied, not shared.
+5. **Move** `TrackSimulator`, `DemoScenario` and their unit tests; remove the `producer` profile,
+   `DemoProducer`, `DemoProducerProperties` and `application-producer.yaml` from the service.
+6. **Tests**: `DemoScenarioTest` currently checks "valid" with the service's Bean Validation
+   annotations, which the producer won't have → check the documented ranges directly.
+   `DemoProducerIntegrationTest` (scenario → correct picture) needs both apps; the service's listener
+   tests already cover each anomaly, so it is replaced by a producer-side test that the records reach
+   a Testcontainers Kafka with the right keys.
+7. **Run**: `docker compose up -d --wait`, start the service, then
+   `./mvnw -f producer/pom.xml package` and `java -jar producer/target/track-producer.jar --ticks=60`.
+   Doing Step 12 first means the producer never creates topics either.
 
 ## Notes & Lessons Learned
 
-- `spring-boot-docker-compose` is an `optional` dependency, so it is **not** packaged into the jar.
-  It is a dev-time feature: use `./mvnw spring-boot:run` (or IntelliJ) during development.
-- Spring Boot auto-connects to the Postgres container, but has **no** Docker Compose service
-  connection for the `apache/kafka` image — hence the fixed `9092:9092` port mapping and the
-  explicit `spring.kafka.bootstrap-servers` setting.
+- **The service doesn't depend on Docker Compose** (Step 12; until then Spring Boot's
+  `spring-boot-docker-compose` started the containers and supplied the DB connection). Connection
+  settings are explicit in `application.yaml` with local defaults, overridable by environment
+  variables (`SPRING_DATASOURCE_URL`, `SPRING_KAFKA_BOOTSTRAP_SERVERS`, ...).
+- **Infrastructure owns the topics**: the one-shot `kafka-init` service creates them
+  (`--if-not-exists`, so every `up` is safe). It uses `network_mode: service:kafka`, so
+  `localhost:9092` inside it *is* the broker — avoiding the advertised-listener problem.
+  `docker compose up -d --wait` waits for the healthchecks *and* for `kafka-init` to finish.
+- **Fail fast on a missing topic**: broker `auto.create.topics.enable=false` (otherwise the first
+  client silently creates a 1-partition topic) and `missing-topics-fatal: true` (the service exits
+  at startup). Tests create the same topics in `KafkaTestcontainersConfiguration`.
+- The `apache/kafka` image drops **all** its defaults once any `KAFKA_*` variable is set, so
+  `compose.yaml` spells out the full single-node KRaft configuration.
 - Kafka clients connect to the bootstrap address, then reconnect to the broker's *advertised*
-  listener. With the same port inside and outside the container (`9092:9092`), the default
+  listener. With the same port inside and outside the container (`9092:9092`),
   `localhost:9092` works from both sides.
-- Postgres is published on a **fixed host port** (`5432:5432`) so DBeaver/psql can connect.
-  With the default lifecycle (`start-and-stop`) the containers stop when the app stops. To keep
-  the DB up independently, run `docker compose up -d` first: if the services are already running,
-  Spring Boot neither starts nor stops them. Stop them with `docker compose stop` / `down`.
+- Postgres is published on a **fixed host port** (`5432:5432`) so the service and DBeaver/psql can
+  connect, with a named volume so `docker compose down` keeps the data (`down -v` deletes it).
 - **Flyway is SQL-first**: migrations are hand-written `V<n>__<name>.sql` files, applied once and
   recorded (with a checksum) in `flyway_schema_history`. Never edit an applied migration — add a
   new one. Hibernate runs with `ddl-auto: validate` as a safety net: the app fails at startup if

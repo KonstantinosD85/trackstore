@@ -1,7 +1,6 @@
 package dev.kostas.trackstore.ingest;
 
 import org.apache.kafka.clients.admin.Admin;
-import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,7 +8,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.KafkaListenerConfigurer;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistrar;
-import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.kafka.core.KafkaOperations;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
@@ -32,8 +30,6 @@ import java.time.Duration;
 public class KafkaConfig implements KafkaListenerConfigurer {
 
     private static final Logger log = LoggerFactory.getLogger(KafkaConfig.class);
-
-    private static final int PARTITIONS = 3;
 
     private final LocalValidatorFactoryBean validator;
 
@@ -99,16 +95,7 @@ public class KafkaConfig implements KafkaListenerConfigurer {
         return Admin.create(kafkaAdmin.getConfigurationProperties());
     }
 
-    // Topic provisioning for local development. In production the source topic belongs to the
-    // platform/producers; we would only own (and create) the dead-letter topic.
-
-    @Bean
-    NewTopic trackUpdatesTopic() {
-        return TopicBuilder.name(Topics.TRACK_UPDATES).partitions(PARTITIONS).replicas(1).build();
-    }
-
-    @Bean
-    NewTopic trackUpdatesDeadLetterTopic() {
-        return TopicBuilder.name(Topics.TRACK_UPDATES_DLT).partitions(PARTITIONS).replicas(1).build();
-    }
+    // No topic creation here: both topics are provisioned by the infrastructure (kafka-init in
+    // compose.yaml; tests: KafkaTestcontainersConfiguration). The listener fails fast if they are
+    // missing (spring.kafka.listener.missing-topics-fatal).
 }
