@@ -7,6 +7,11 @@ spring:
     url: jdbc:postgresql://localhost:5432/trackstore
     username: trackstore
     password: secret   # local development only
+    hikari:
+      # Max wait for a pooled connection (default 30s). If the database is down, a request
+      # fails after this long with 503 (see DatabaseUnavailableHandler) instead of hanging.
+      # Milliseconds: binds to HikariConfig's long setter, so "2s" is not accepted here.
+      connection-timeout: 2000
   kafka:
     bootstrap-servers: localhost:9092
     consumer:

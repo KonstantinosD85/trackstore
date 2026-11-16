@@ -1,20 +1,21 @@
 package dev.kostas.trackstore.track;
 
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ProblemDetail;
-import org.springframework.web.ErrorResponseException;
-
 /**
- * Thrown by the read API when a {@code trackId} has never been seen.
+ * Domain error: the requested track has never been seen (or was dropped from the picture).
  * <p>
- * As an {@link ErrorResponseException} it carries its own HTTP status and RFC 9457 body, so Spring
- * MVC renders it as {@code 404} with {@code application/problem+json} — no handler code needed.
+ * Thrown by the read services. It knows nothing about HTTP; the web layer
+ * ({@code web.ApiExceptionHandler}) decides that it becomes a {@code 404}.
  */
-public class TrackNotFoundException extends ErrorResponseException {
+public class TrackNotFoundException extends RuntimeException {
+
+    private final String trackId;
 
     public TrackNotFoundException(String trackId) {
-        super(HttpStatus.NOT_FOUND,
-                ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, "No track with id '" + trackId + "'"),
-                null);
+        super("No track with id '" + trackId + "'");
+        this.trackId = trackId;
+    }
+
+    public String trackId() {
+        return trackId;
     }
 }

@@ -1,6 +1,5 @@
 package dev.kostas.trackstore.history;
 
-import dev.kostas.trackstore.track.TrackNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -13,13 +12,14 @@ import java.util.List;
 
 /**
  * Read API for the history of one track.
+ * Errors (unknown track, database down) are mapped to HTTP by {@code web.ApiExceptionHandler}.
  */
 @RestController
 public class TrackHistoryController {
 
-    private final TrackHistoryRepository history;
+    private final TrackHistoryQueryService history;
 
-    public TrackHistoryController(TrackHistoryRepository history) {
+    public TrackHistoryController(TrackHistoryQueryService history) {
         this.history = history;
     }
 
@@ -34,16 +34,12 @@ public class TrackHistoryController {
     public List<TrackHistoryEntryResponse> history(@PathVariable String trackId,
                                                    @RequestParam(required = false) Instant from,
                                                    @RequestParam(required = false) Instant to) {
+        // Request validation, so it stays here: a malformed request, not a business answer.
         if (from != null && to != null && from.isAfter(to)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "'from' must not be after 'to'");
         }
-
-        List<TrackHistoryEntry> entries = history.findHistory(trackId, from, to);
-
-        // Only an empty result needs the extra query to tell "unknown track" from "empty range".
-        if (entries.isEmpty() && !history.existsByTrackId(trackId)) {
-            throw new TrackNotFoundException(trackId);
-        }
-        return entries.stream().map(TrackHistoryEntryResponse::from).toList();
+        return history.history(trackId, from, to).stream()
+                .map(TrackHistoryEntryResponse::from)
+                .toList();
     }
 }

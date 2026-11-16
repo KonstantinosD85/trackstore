@@ -21,7 +21,7 @@ The step-by-step build log, with every decision and lesson, is in [docs/PLAN.md]
 | *Stretch:* dead-letter topic | ✅ `track-updates-dlt`, original payload plus the reason in headers |
 | *Stretch:* stale/dropped tracks | ✅ `STALE` after 10 s, removed from the picture after 30 s (configurable) |
 | *Stretch:* rebuild the picture from the topic on restart | ✅ in a different form: the picture is stored in PostgreSQL, and on restart the consumer resumes from its committed offset and catches up; `/health/readiness` stays "not ready" until it has (see [After a restart](#after-a-restart)) |
-| *Stretch:* tests for validation and ordering/idempotency | ✅ 106 service tests and 31 producer tests |
+| *Stretch:* tests for validation and ordering/idempotency | ✅ 110 service tests and 31 producer tests |
 | *Stretch:* health endpoint with consumer lag | ✅ `/health` → `consumerLag` |
 
 ## Quick start
@@ -57,16 +57,16 @@ tick 7: sent INVALID for TRK-003 — identity ENEMY     Rejected track update [�
      ▼                                             │ track_history        │ append-only, unique(track_id, observed_at)
  [track-updates] 3 partitions                      │ track_picture        │ one row per track, status ACTIVE/STALE
      │                                             └──────────────────────┘
-     ▼                                                  ▲          ▲   ▲
- TrackUpdateListener ── invalid ──► log + [track-updates-dlt]     │   │
-     │ @Valid TrackUpdate                               │          │   │
-     ▼                                                  │          │   │
- TrackUpdateService ── one transaction ─────────────────┘          │   │
+     ▼                                                  ▲           ▲   ▲
+ TrackUpdateListener ── invalid ──► log + [track-updates-dlt]       │   │
+     │ @Valid TrackUpdate                               │           │   │
+     ▼                                                  │           │   │
+ TrackUpdateService ── one transaction ─────────────────┘           │   │
      1. history: INSERT … ON CONFLICT DO NOTHING  (→ DUPLICATE)     │   │
      2. picture: UPSERT … WHERE stored < incoming (→ STALE)         │   │
-                                                                   │   │
- PictureExpiryJob (every 2 s, also at startup): mark STALE / drop ─┘   │
- REST: /picture  /tracks/{id}  /tracks/{id}/history  /health  /metrics ┘
+                                                                    │   │
+ PictureExpiryJob (every 2 s, also at startup): mark STALE / drop  ─┘   │
+ REST: /picture  /tracks/{id}  /tracks/{id}/history  /health  /metrics  ┘
 ```
 
 It's one deployable with three packages: `ingest` (Kafka → service), `picture` and `history`, each
@@ -153,6 +153,8 @@ because restarting a lagging consumer only makes it slower.
 | `GET /health`, `GET /metrics` | Actuator. `consumerLag` shows the lag per partition for the whole consumer group |
 | `GET /health/readiness`, `GET /health/liveness` | Probes. Readiness includes `catchUp` (503 until the backlog after a restart is consumed); liveness doesn't depend on Kafka |
 
+Any read endpoint returns **503** with `Retry-After: 5` if the database is unreachable (see below).
+
 ```json
 GET /tracks/TRK-002
 {"trackId":"TRK-002","timestamp":"2026-11-16T08:36:19Z","latitude":37.998532,"longitude":23.803657,
@@ -163,7 +165,34 @@ GET /tracks/NOPE   → 404, application/problem+json
 ```
 
 Responses are DTOs, not entities, so the JSON contract doesn't change when a table does. Errors
-follow RFC 9457 (Problem Details).
+follow RFC 9457 (Problem Details). The read services throw domain exceptions
+(`TrackNotFoundException`) that know nothing about HTTP; one `@RestControllerAdvice`,
+`ApiExceptionHandler`, maps them (and database outages) to status codes.
+
+### If the database is down
+
+At first, stopping PostgreSQL made every request hang for **30 s** (Hikari's default wait for a
+pooled connection) and then fail with a generic **500**. Now the pool waits at most 2 s
+(`spring.datasource.hikari.connection-timeout`), and `ApiExceptionHandler` turns
+"no connection" into a 503 the client can act on. Measured with `docker compose stop postgres`:
+
+```
+GET /picture             → 503 in 2.03 s     (before: 500 after 30.07 s)
+Retry-After: 5
+Content-Type: application/problem+json
+{"detail":"The track database is unavailable. Try again shortly.","instance":"/picture",
+ "status":503,"title":"Service Unavailable","dependency":"database"}
+```
+
+The body names the dependency but not the cause: exception messages contain hosts and pool
+details, so they go to the log (one line per request), and `/health` shows the `db` component as
+`DOWN`. After `docker compose start postgres`, the next request succeeds; no restart is needed.
+Ingestion loses nothing during the outage: the listener retries the same record (unlimited
+retries, see below) and continues when the database is back.
+
+I deliberately **didn't add the database to readiness**: every instance shares it, so an outage
+would take all of them out of rotation at once and the load balancer would answer with its own
+error instead of this 503.
 
 ## Decisions and trade-offs
 
@@ -205,6 +234,10 @@ follow RFC 9457 (Problem Details).
   out-of-order, duplicates and unparseable messages. Also the health endpoint: a stopped listener
   turns it `DOWN`, lag builds up, and it recovers after a restart. The readiness rule ("not ready
   until caught up, then stays ready") has its own unit tests.
+- **Web slice (`@WebMvcTest`):** controllers with mocked repositories that throw what Spring
+  throws when PostgreSQL is down → 503 problem response, no internal details in the body. (The
+  live outage above was checked by hand; stopping the shared test database would break the other
+  tests.)
 - **Producer:** `MockProducer` for the publishing loop, plus a real broker to check that records
   are keyed so that each track stays on one partition.
 

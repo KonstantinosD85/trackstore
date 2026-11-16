@@ -63,6 +63,7 @@ Each step is small, reviewed, and committed before moving on.
 | 12 | Run without Spring Boot's Docker Compose support: explicit DB config, topics created by Compose, fail fast on missing topics (see below) | Externalized config, `missing-topics-fatal`, Compose healthchecks | ✅ Done |
 | 13 | Demo producer as its own plain-Java application, run independently of the service (see below); replaces the `producer` profile of step 9 | — (plain Java: `KafkaProducer`, `MockProducer`, shutdown hook) | ✅ Done |
 | 14 | Readiness waits for catch-up after a restart (`catchUp` in `/health/readiness`, latching); README: restart behaviour and its limits | Health groups, readiness vs liveness probes | ✅ Done |
+| 15 | Database outage on the read API: 503 + `Retry-After` problem response in ~2 s, instead of 500 after 30 s. Read services (`PictureQueryService`, `TrackHistoryQueryService`) throw the domain `TrackNotFoundException`; `ApiExceptionHandler` maps domain/data errors to HTTP | `@RestControllerAdvice`, `@ExceptionHandler`, `ProblemDetail`, `@Service` + `@Transactional(readOnly)`, Hikari `connection-timeout`, `@WebMvcTest` slice | ✅ Done |
 
 Order: 12 → 13 → 11. The README is written last, so it describes the final way to run everything.
 
@@ -180,9 +181,10 @@ Decisions: a **standalone project** next to the service (not a multi-module buil
   evicts cached entities so a later `findById` in the same transaction doesn't return stale data.
 - **Read API returns DTOs, not entities** (`TrackStateResponse`, `TrackHistoryEntryResponse`): the
   JSON contract is independent of the table layout and uses the producer's field name `timestamp`.
-- **Errors as RFC 9457 Problem Details** (`spring.mvc.problemdetails.enabled`): an exception that
-  *is* an `ErrorResponse` (`TrackNotFoundException`, `ResponseStatusException`) or a bad parameter
-  (`from=yesterday`) becomes `application/problem+json` without any handler code.
+- **Errors as RFC 9457 Problem Details** (`spring.mvc.problemdetails.enabled`): Spring MVC's own
+  errors (`ResponseStatusException`, a bad parameter like `from=yesterday`) become
+  `application/problem+json` without any handler code. *(Step 8 made `TrackNotFoundException` an
+  `ErrorResponseException` too; step 15 replaced that, see below.)*
 - **History filters are optional** and half-open `[from, to)`, so consecutive windows never overlap.
   Unknown track → 404; known track with an empty window → `200 []`. `from > to` → 400.
 - **PostgreSQL can't type `:param is null`** ("could not determine data type of parameter"), so
@@ -232,3 +234,19 @@ Decisions: a **standalone project** next to the service (not a multi-module buil
 - **Readiness ≠ liveness**: `catchUp` (in the `readiness` group only) is `OUT_OF_SERVICE` until the
   lag first drops to `ready-max-lag`, then latches `UP`, so a later lag burst can't take every
   instance out of service at once. Liveness never depends on Kafka.
+- **Database down → hang, then 500** (step 15): Hikari's `connection-timeout` (default **30 s**) is
+  how long a request waits for a pooled connection. Then `CannotCreateTransactionException`
+  (transactional reads) or `DataAccessResourceFailureException` (non-transactional) is thrown;
+  unmapped, it becomes Spring Boot's plain 500 (not problem+json: `problemdetails.enabled` only
+  covers Spring MVC's own exceptions). Fix: 2 s timeout + `@RestControllerAdvice` → 503.
+- **`spring.datasource.hikari.*` doesn't take `2s`**: those keys bind to `HikariConfig`'s own
+  setters (`long` milliseconds), so Spring's `Duration` conversion doesn't apply → startup failure.
+  The `@WebMvcTest` slice couldn't catch it (no datasource); the full suite and the live run did.
+- **Don't put shared dependencies in readiness**: if every instance depends on the same database,
+  a DB outage would take all of them out of rotation at once. Report it in `/health`, answer 503.
+- **Domain errors vs HTTP** (step 15): `TrackNotFoundException` used to extend
+  `ErrorResponseException`, i.e. the domain chose the HTTP status. Now it's a plain
+  `RuntimeException` thrown by the read services, and `ApiExceptionHandler` decides it's a 404, so
+  the service could be called from elsewhere (a CLI, a Kafka consumer) without HTTP leaking in.
+  Request validation (`from > to` → 400) stays in the controller: it's about a malformed request,
+  not a business answer.
