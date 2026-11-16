@@ -19,7 +19,7 @@ Each step is small, reviewed, and committed before moving on.
 ```
  producer ──► [track-updates] (key = trackId)
                      │
-              TrackUpdateListener ──invalid──► log + [track-updates.DLT]
+              TrackUpdateListener ──invalid──► log + [track-updates-dlt]
                      │ valid
                TrackUpdateService  (one DB transaction)
                 ├─► track_history  (INSERT, unique(trackId, timestamp) → duplicates skipped)
@@ -59,7 +59,7 @@ Each step is small, reviewed, and committed before moving on.
 | 9  | Demo producer (`producer` profile): moving tracks + a duplicate, an out-of-order and two invalid messages | `@Profile`, `CommandLineRunner`, `KafkaTemplate`, `@ConfigurationProperties` record + `@Validated` | ✅ Done |
 | 10a | Stretch: stale tracks — `STALE` after 10 s, removed from the picture after 30 s (configurable), checked at startup and every 2 s | `@Scheduled`, `@EnableScheduling`, injectable `Clock`, `ApplicationContextRunner` | ✅ Done |
 | 10b | Stretch: `/health` with a `consumerLag` component (lag per partition for the whole group), `/metrics` | Actuator, custom `HealthIndicator`, Kafka `Admin`, Micrometer | ✅ Done |
-| 11 | README: how to run, architecture diagram, decisions, trade-offs, future work | — | ⬜ |
+| 11 | README: how to run, architecture diagram, decisions, trade-offs, future work (first person, compact, AI note) | — | ✅ Done |
 | 12 | Run without Spring Boot's Docker Compose support: explicit DB config, topics created by Compose, fail fast on missing topics (see below) | Externalized config, `missing-topics-fatal`, Compose healthchecks | ✅ Done |
 | 13 | Demo producer as its own plain-Java application, run independently of the service (see below); replaces the `producer` profile of step 9 | — (plain Java: `KafkaProducer`, `MockProducer`, shutdown hook) | ✅ Done |
 

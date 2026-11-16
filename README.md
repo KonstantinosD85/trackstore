@@ -1,0 +1,197 @@
+# Track Picture Service
+
+A Spring Boot service that consumes track updates (aircraft, UAVs, missiles) from the Kafka topic
+`track-updates`. It keeps the **current picture** of every track and its **full history** in
+PostgreSQL, and serves both through a REST API. A separate demo producer publishes moving tracks,
+including a duplicate, an out-of-order update and invalid messages, so the handling can be seen
+working.
+
+The step-by-step build log, with every decision and lesson, is in [docs/PLAN.md](docs/PLAN.md).
+
+## Requirements checklist
+
+| Requirement | Status |
+|---|---|
+| Consume `track-updates`; validate; reject invalid updates with a visible reason | ✅ log line with the reason |
+| Picture: latest state per track, `GET /picture`, `GET /tracks/{trackId}` | ✅ |
+| History: every accepted update, `GET /tracks/{trackId}/history?from&to` | ✅ |
+| Ordering: an older update never overwrites a newer state | ✅ |
+| Idempotency: redelivery/replay doesn't corrupt the picture or duplicate history | ✅ |
+| Producer with a duplicate, an out-of-order and an invalid message | ✅ `producer/`, a standalone app |
+| *Stretch:* dead-letter topic | ✅ `track-updates-dlt`, original payload plus the reason in headers |
+| *Stretch:* stale/dropped tracks | ✅ `STALE` after 10 s, removed from the picture after 30 s (configurable) |
+| *Stretch:* rebuild the picture from the topic on restart | ⚠️ not needed: the picture is stored in PostgreSQL and survives restarts (see trade-offs) |
+| *Stretch:* tests for validation and ordering/idempotency | ✅ 101 service tests and 31 producer tests |
+| *Stretch:* health endpoint with consumer lag | ✅ `/health` → `consumerLag` |
+
+## Quick start
+
+Requires Java 21 and Docker. Use three terminals:
+
+```bash
+make infra    # Postgres + Kafka, creates the topics, returns when ready  (docker compose up -d --wait)
+make server   # the service on http://localhost:8080                       (./mvnw spring-boot:run)
+make sim      # the demo feed: 3 tracks, 30 ticks, 1 s apart               (see `make sim-help`)
+```
+
+`make sim ARGS="--ticks=0"` runs until Ctrl+C. After you stop it, the tracks turn `STALE` after
+10 s and disappear from the picture after 30 s. `make test` runs all the tests. `make infra-stop`
+stops the containers; the database stays in `./postgres-data`.
+
+What to look for:
+
+```text
+# producer                                            # service
+tick 3: sent DUPLICATE for TRK-001                    DUPLICATE trackId=TRK-001 timestamp=…:13Z
+tick 5: sent OUT_OF_ORDER for TRK-002                 STALE     trackId=TRK-002 timestamp=…:14Z
+tick 7: sent INVALID for TRK-003 — latitude 91        Rejected track update [… key=TRK-003]: invalid fields:
+                                                        latitude must be less than or equal to 90.0 (was 91.0)
+tick 7: sent INVALID for TRK-003 — identity ENEMY     Rejected track update [… key=TRK-003]: unparseable payload: …
+```
+
+## Architecture
+
+```
+ producer/ (standalone)                                  PostgreSQL
+     │ key = trackId, JSON                         ┌──────────────────────┐
+     ▼                                             │ track_history        │ append-only, unique(track_id, observed_at)
+ [track-updates] 3 partitions                      │ track_picture        │ one row per track, status ACTIVE/STALE
+     │                                             └──────────────────────┘
+     ▼                                                  ▲          ▲   ▲
+ TrackUpdateListener ── invalid ──► log + [track-updates-dlt]     │   │
+     │ @Valid TrackUpdate                               │          │   │
+     ▼                                                  │          │   │
+ TrackUpdateService ── one transaction ─────────────────┘          │   │
+     1. history: INSERT … ON CONFLICT DO NOTHING  (→ DUPLICATE)     │   │
+     2. picture: UPSERT … WHERE stored < incoming (→ STALE)         │   │
+                                                                   │   │
+ PictureExpiryJob (every 2 s, also at startup): mark STALE / drop ─┘   │
+ REST: /picture  /tracks/{id}  /tracks/{id}/history  /health  /metrics ┘
+```
+
+It's one deployable with three packages: `ingest` (Kafka → service), `picture` and `history`, each
+with its own entity, repository and controller. The producer is a separate plain-Java project,
+with no shared code.
+
+## Topic and message design
+
+- **Key = `trackId`.** All updates of a track land on the same partition, so Kafka delivers them
+  in order, while different tracks are processed in parallel (3 partitions, 3 consumer threads).
+- **JSON value**, matching the contract: `trackId`, `timestamp` (ISO-8601 UTC), `latitude`, `longitude`,
+  optional `altitude` (≥ 0) and `heading` (0 ≤ h < 360), and `identity`
+  (`UNKNOWN|FRIEND|NEUTRAL|HOSTILE`).
+- **Consumed as a String and converted at the listener**, not in the Kafka deserializer. That way
+  the record keeps the producer's exact bytes, and the **DLT receives the original payload** for
+  every kind of rejection (bad JSON, unknown enum, out-of-range value), with the exception in
+  `kafka_dlt-*` headers.
+- **Topics belong to the infrastructure.** `compose.yaml` creates them; the broker doesn't
+  auto-create topics, and the service refuses to start if one is missing (`missing-topics-fatal`).
+  This avoids a silently auto-created topic with one partition.
+
+## Ordering, duplicates and replay
+
+| Situation | What happens | Outcome |
+|---|---|---|
+| New, newest update | appended to history, replaces the picture row | `APPLIED` |
+| Out of order (older than the stored state) | appended to history, picture unchanged | `STALE` |
+| Exact duplicate (redelivery, replay, producer retry) | history's unique `(track_id, observed_at)` rejects it, so the picture is never touched | `DUPLICATE` |
+| Same timestamp, different content | same observation: the first version wins | `DUPLICATE` |
+| Update already older than drop-after (30 s) | history only, so a dropped track can't come back with old data | `STALE` |
+| Invalid values / unparseable | never stored; log line + DLT | rejected |
+| DB down or other unexpected error | retried with back-off (0.5 s … 30 s, no limit); the partition waits, so ordering holds | retried |
+
+Two details make this safe under concurrency and crashes:
+
+- **Each write is a single atomic SQL statement.** The picture update is
+  `INSERT … ON CONFLICT DO UPDATE … WHERE track_picture.observed_at < EXCLUDED.observed_at`. The
+  database compares and writes in one step, so there's no read-compare-write race. History uses
+  `ON CONFLICT DO NOTHING` instead of catching an exception, because a JPA constraint violation
+  would mark the whole transaction for rollback.
+- **History and picture are written in one transaction**, so "in history" means "already applied
+  to the picture". If the service crashes after the commit but before the Kafka offset commit, the
+  redelivered record is detected as a duplicate.
+
+Ordering uses the sensor's **`timestamp`**, never arrival time. History also stores `receivedAt`,
+so late arrivals are visible. In this excerpt, `…:14Z` arrived after `…:15Z`:
+
+```json
+{"timestamp":"2026-11-16T08:36:14Z","latitude":37.999347,"receivedAt":"2026-11-16T08:36:16.065841Z"}
+{"timestamp":"2026-11-16T08:36:15Z","latitude":37.999184,"receivedAt":"2026-11-16T08:36:16.053786Z"}
+```
+
+## Read API
+
+| Endpoint | Response |
+|---|---|
+| `GET /picture` | All tracks, sorted by `trackId` |
+| `GET /tracks/{trackId}` | The latest state; **404** if unknown or dropped |
+| `GET /tracks/{trackId}/history?from=&to=` | Chronological; `from` inclusive, `to` exclusive, both optional ISO-8601. Unknown track → **404**; known track with nothing in range → `200 []`; `from` after `to` or a bad date → **400** |
+| `GET /health`, `GET /metrics` | Actuator. `consumerLag` shows the lag per partition for the whole consumer group |
+
+```json
+GET /tracks/TRK-002
+{"trackId":"TRK-002","timestamp":"2026-11-16T08:36:19Z","latitude":37.998532,"longitude":23.803657,
+ "altitude":1500.0,"heading":117.0,"identity":"UNKNOWN","lastReceivedAt":"2026-11-16T08:36:20.207805Z","status":"ACTIVE"}
+
+GET /tracks/NOPE   → 404, application/problem+json
+{"detail":"No track with id 'NOPE'","instance":"/tracks/NOPE","status":404,"title":"Not Found"}
+```
+
+Responses are DTOs, not entities, so the JSON contract doesn't change when a table does. Errors
+follow RFC 9457 (Problem Details).
+
+## Decisions and trade-offs
+
+- **One deployable, separate modules.** It's simpler to run and reason about. Splitting picture
+  and history into two services would mean two consumer groups on the same topic; each store's
+  write is already idempotent on its own, so that split is mostly operational work.
+- **PostgreSQL for both stores.** It's durable, the conditional upsert and range queries are
+  native, and the picture survives restarts. That's why I didn't build "rebuild the picture from
+  the topic": it isn't needed. A replay with a new consumer group would refill it idempotently,
+  but only with tracks observed in the last 30 s, since anything older would be dropped anyway.
+- **One transaction for history and picture.** It gives simple, strong guarantees, but couples the
+  two stores. The requirements allow eventual consistency; I took the stronger option because it
+  costs nothing here.
+- **Validation at the listener (`@Valid`)**, since Kafka is the only entry point. A future second
+  entry point would have to validate as well. The rules mirror the DB columns (for example
+  `@Size(max = 64)` ↔ `VARCHAR(64)`), so a "valid" message can't fail on insert and block its
+  partition.
+- **Unlimited retries for unexpected errors.** Valid data is never dropped and per-track order is
+  kept. The cost is that a bug that always fails one valid record stalls its partition; that's
+  visible as lag on `/health`.
+- **Staleness is measured from the observation timestamp, not arrival.** After a replay or a
+  backlog, old positions don't look live. Dropped tracks are deleted from the picture; their
+  history stays.
+- **The producer is a separate plain-Java app with its own copy of the message contract.** It
+  behaves like a real external feed, but the contract is duplicated rather than shared.
+
+## Testing
+
+- **Unit tests:** validation rules (boundaries for every field), service decisions (Mockito),
+  configuration binding, lag arithmetic, the simulator and scenario.
+- **Against real PostgreSQL (Testcontainers):** the repositories' SQL (duplicates, "newer wins",
+  ranges, expiry) and the service on real repositories.
+- **End to end with real Kafka:** raw JSON in → picture, history and DLT out, including
+  out-of-order, duplicates and unparseable messages. Also the health endpoint: a stopped listener
+  turns it `DOWN`, lag builds up, and it recovers after a restart.
+- **Producer:** `MockProducer` for the publishing loop, plus a real broker to check that records
+  are keyed so that each track stays on one partition.
+
+## With more time
+
+- History **pagination/limits**, and retention or table partitioning for long-running data.
+- Actuator on a **separate management port** with authentication; the API also has none today.
+- **Counters per outcome** (`APPLIED`/`STALE`/`DUPLICATE`/rejected) as metrics, and alerts on lag.
+- A **schema registry** (Avro/Protobuf) instead of JSON copied between producer and service, or at
+  least **contract tests** between them.
+- Store **partition/offset** in history, to trace any row back to its Kafka record.
+- A replicated, multi-broker Kafka; CI; container images for the service and the producer.
+
+## How this was built
+
+I built this with an AI coding assistant (Claude Code) as a pair programmer. I set up a step-by-step
+plan ([docs/PLAN.md](docs/PLAN.md)) and took the design decisions at each step. That includes the
+topic ownership, the staleness rules and dropping silent tracks, and the standalone producer. I
+reviewed every step and committed each one myself. The assistant wrote most of the code and tests
+and explained the Spring concepts as we went; everything was checked by running the tests and the
+live demo.
