@@ -20,8 +20,8 @@ The step-by-step build log, with every decision and lesson, is in [docs/PLAN.md]
 | Producer with a duplicate, an out-of-order and an invalid message | ✅ `producer/`, a standalone app |
 | *Stretch:* dead-letter topic | ✅ `track-updates-dlt`, original payload plus the reason in headers |
 | *Stretch:* stale/dropped tracks | ✅ `STALE` after 10 s, removed from the picture after 30 s (configurable) |
-| *Stretch:* rebuild the picture from the topic on restart | ⚠️ not needed: the picture is stored in PostgreSQL and survives restarts (see trade-offs) |
-| *Stretch:* tests for validation and ordering/idempotency | ✅ 101 service tests and 31 producer tests |
+| *Stretch:* rebuild the picture from the topic on restart | ✅ in a different form: the picture is stored in PostgreSQL, and on restart the consumer resumes from its committed offset and catches up; `/health/readiness` stays "not ready" until it has (see [After a restart](#after-a-restart)) |
+| *Stretch:* tests for validation and ordering/idempotency | ✅ 106 service tests and 31 producer tests |
 | *Stretch:* health endpoint with consumer lag | ✅ `/health` → `consumerLag` |
 
 ## Quick start
@@ -119,6 +119,30 @@ so late arrivals are visible. In this excerpt, `…:14Z` arrived after `…:15Z`
 {"timestamp":"2026-11-16T08:36:15Z","latitude":37.999184,"receivedAt":"2026-11-16T08:36:16.053786Z"}
 ```
 
+### After a restart
+
+The consumer group's committed offsets are stored in Kafka, so on restart the consumer **resumes
+right after the last committed record** and processes everything published while it was down, in
+order per track. That catch-up is what rebuilds the picture. At startup, the expiry job drops
+tracks silent for more than 30 s. The backlog then re-adds those observed within the last 30 s;
+older backlog entries go to history only. Records processed but not committed before a crash are
+delivered again and come out as `DUPLICATE`.
+
+While catching up, the picture is behind, so **`/health/readiness` reports `OUT_OF_SERVICE`
+(HTTP 503) until the lag drops to 10 records** (`trackstore.ingestion.ready-max-lag`). A load
+balancer or Kubernetes then holds traffic back without restarting anything. From a real run with
+9,003 records waiting:
+
+```text
+11:56:29 HTTP 503 {"status":"OUT_OF_SERVICE","catchUp":{"caughtUp":false,"totalLag":9003,"readyAtLag":10}}
+11:56:34 HTTP 503 {"status":"OUT_OF_SERVICE","catchUp":{"caughtUp":false,"totalLag":5476,"readyAtLag":10}}
+11:56:38 HTTP 200 {"status":"UP","catchUp":{"caughtUp":true}}
+```
+
+Once caught up, the instance stays ready: a later burst of lag shouldn't take every instance out of
+service at the same time, and it stays visible in `consumerLag`. Liveness never depends on Kafka,
+because restarting a lagging consumer only makes it slower.
+
 ## Read API
 
 | Endpoint | Response |
@@ -127,6 +151,7 @@ so late arrivals are visible. In this excerpt, `…:14Z` arrived after `…:15Z`
 | `GET /tracks/{trackId}` | The latest state; **404** if unknown or dropped |
 | `GET /tracks/{trackId}/history?from=&to=` | Chronological; `from` inclusive, `to` exclusive, both optional ISO-8601. Unknown track → **404**; known track with nothing in range → `200 []`; `from` after `to` or a bad date → **400** |
 | `GET /health`, `GET /metrics` | Actuator. `consumerLag` shows the lag per partition for the whole consumer group |
+| `GET /health/readiness`, `GET /health/liveness` | Probes. Readiness includes `catchUp` (503 until the backlog after a restart is consumed); liveness doesn't depend on Kafka |
 
 ```json
 GET /tracks/TRK-002
@@ -146,9 +171,14 @@ follow RFC 9457 (Problem Details).
   and history into two services would mean two consumer groups on the same topic; each store's
   write is already idempotent on its own, so that split is mostly operational work.
 - **PostgreSQL for both stores.** It's durable, the conditional upsert and range queries are
-  native, and the picture survives restarts. That's why I didn't build "rebuild the picture from
-  the topic": it isn't needed. A replay with a new consumer group would refill it idempotently,
-  but only with tracks observed in the last 30 s, since anything older would be dropped anyway.
+  native, and the picture survives restarts. Together with Kafka's committed offsets, a restart
+  doesn't need a separate rebuild. The weak spot is that offsets live in Kafka and data lives in
+  PostgreSQL: **restoring the database from an older backup** would leave a gap, because the
+  consumer continues from where Kafka says it was. The fix is to reset the group's offsets to the
+  backup time (`kafka-consumer-groups.sh --reset-offsets --to-datetime …`) and let idempotency
+  absorb the overlap. Kafka's retention bounds how far back that works (7 days by default; the same
+  default applies to committed offsets of an inactive group, after which `earliest` re-reads the
+  retained topic, which is harmless thanks to idempotency).
 - **One transaction for history and picture.** It gives simple, strong guarantees, but couples the
   two stores. The requirements allow eventual consistency; I took the stronger option because it
   costs nothing here.
@@ -173,7 +203,8 @@ follow RFC 9457 (Problem Details).
   ranges, expiry) and the service on real repositories.
 - **End to end with real Kafka:** raw JSON in → picture, history and DLT out, including
   out-of-order, duplicates and unparseable messages. Also the health endpoint: a stopped listener
-  turns it `DOWN`, lag builds up, and it recovers after a restart.
+  turns it `DOWN`, lag builds up, and it recovers after a restart. The readiness rule ("not ready
+  until caught up, then stays ready") has its own unit tests.
 - **Producer:** `MockProducer` for the publishing loop, plus a real broker to check that records
   are keyed so that each track stays on one partition.
 
@@ -186,6 +217,8 @@ follow RFC 9457 (Problem Details).
   least **contract tests** between them.
 - Store **partition/offset** in history, to trace any row back to its Kafka record.
 - A replicated, multi-broker Kafka; CI; container images for the service and the producer.
+- A **volume for Kafka** in `compose.yaml`: today `docker compose down` wipes topics and offsets,
+  while PostgreSQL keeps its data in `./postgres-data`.
 
 ## How this was built
 

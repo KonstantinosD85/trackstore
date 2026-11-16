@@ -44,8 +44,16 @@ management:
   endpoint:
     health:
       show-details: always
+      group:
+        # /health/readiness: ready only once the backlog after a (re)start has been consumed.
+        # (/health/liveness stays independent of Kafka: a lagging consumer must not be restarted.)
+        readiness:
+          include: readinessState, catchUp
 
 trackstore:
+  ingestion:
+    # Ready for traffic once the total consumer lag has dropped to this many records (see CatchUpHealthIndicator).
+    ready-max-lag: 10
   picture:
     # Ages are measured from the track's latest observation timestamp (see PictureExpiryJob).
     stale-after: 10s      # no observation for this long → status STALE

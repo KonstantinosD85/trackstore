@@ -62,6 +62,21 @@ class IngestionHealthIntegrationTest {
     }
 
     @Test
+    void readinessProbeIncludesCatchUpAndLivenessDoesNot() {
+        // Nothing is waiting on the test topic, so the service is caught up and ready.
+        assertThat(mvc.get().uri("/health/readiness"))
+                .hasStatusOk()
+                .bodyJson().isLenientlyEqualTo("""
+                        { "status": "UP", "components": { "readinessState": {}, "catchUp": { "status": "UP" } } }
+                        """);
+
+        // Liveness must not depend on Kafka: a lagging consumer must not be restarted.
+        assertThat(mvc.get().uri("/health/liveness"))
+                .hasStatusOk()
+                .bodyText().doesNotContain("catchUp", "consumerLag");
+    }
+
+    @Test
     void stoppedListenerIsDownWhileLagGrowsAndRecoversAfterRestart() {
         listeners.stop();
         try {

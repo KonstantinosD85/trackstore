@@ -62,6 +62,7 @@ Each step is small, reviewed, and committed before moving on.
 | 11 | README: how to run, architecture diagram, decisions, trade-offs, future work (first person, compact, AI note) | — | ✅ Done |
 | 12 | Run without Spring Boot's Docker Compose support: explicit DB config, topics created by Compose, fail fast on missing topics (see below) | Externalized config, `missing-topics-fatal`, Compose healthchecks | ✅ Done |
 | 13 | Demo producer as its own plain-Java application, run independently of the service (see below); replaces the `producer` profile of step 9 | — (plain Java: `KafkaProducer`, `MockProducer`, shutdown hook) | ✅ Done |
+| 14 | Readiness waits for catch-up after a restart (`catchUp` in `/health/readiness`, latching); README: restart behaviour and its limits | Health groups, readiness vs liveness probes | ✅ Done |
 
 Order: 12 → 13 → 11. The README is written last, so it describes the final way to run everything.
 
@@ -225,3 +226,9 @@ Decisions: a **standalone project** next to the service (not a multi-module buil
   restarting a DOWN instance would make it worse. `DOWN` only when the broker is unreachable or a
   listener container is stopped. Lag goes in the details, for dashboards/alerts.
 - `show-details: always` is for the local demo; production would use `when-authorized`.
+- **Restart = catch-up**: committed offsets live in Kafka, so a restarted consumer resumes after the
+  last committed record; that backlog *is* the picture rebuild. Limit: offsets (Kafka) and data
+  (PostgreSQL) are separate — restoring an older DB backup needs an offset reset to the backup time.
+- **Readiness ≠ liveness**: `catchUp` (in the `readiness` group only) is `OUT_OF_SERVICE` until the
+  lag first drops to `ready-max-lag`, then latches `UP`, so a later lag burst can't take every
+  instance out of service at once. Liveness never depends on Kafka.
