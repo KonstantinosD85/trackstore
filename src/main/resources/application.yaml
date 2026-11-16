@@ -24,6 +24,18 @@ spring:
     problemdetails:
       enabled: true
 
+management:
+  endpoints:
+    web:
+      # Serve the endpoints at the root (/health, /metrics) instead of under /actuator.
+      base-path: /
+      # /health (incl. consumer lag) and /metrics (incl. Kafka client metrics).
+      exposure:
+        include: health, metrics
+  endpoint:
+    health:
+      show-details: always
+
 trackstore:
   picture:
     # Ages are measured from the track's latest observation timestamp (see PictureExpiryJob).

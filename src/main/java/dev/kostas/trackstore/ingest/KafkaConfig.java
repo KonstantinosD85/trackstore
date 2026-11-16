@@ -1,5 +1,6 @@
 package dev.kostas.trackstore.ingest;
 
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
@@ -9,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.KafkaListenerConfigurer;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistrar;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.kafka.core.KafkaOperations;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
@@ -85,6 +87,16 @@ public class KafkaConfig implements KafkaListenerConfigurer {
         backOff.setMaxInterval(Duration.ofSeconds(30).toMillis());
 
         return new DefaultErrorHandler(logAndDeadLetter, backOff);
+    }
+
+    /**
+     * Kafka admin client for {@link ConsumerLagHealthIndicator}, built from Spring Boot's admin
+     * settings (same bootstrap servers). Long-lived, and closed by Spring on shutdown
+     * ({@code close()} is detected as the destroy method).
+     */
+    @Bean
+    Admin kafkaAdminClient(KafkaAdmin kafkaAdmin) {
+        return Admin.create(kafkaAdmin.getConfigurationProperties());
     }
 
     // Topic provisioning for local development. In production the source topic belongs to the

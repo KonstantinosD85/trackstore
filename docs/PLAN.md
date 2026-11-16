@@ -53,7 +53,7 @@ Each step is small, reviewed, and committed before moving on.
 | 8  | REST API: `GET /picture`, `GET /tracks/{id}`, `GET /tracks/{id}/history?from&to` (optional, `[from, to)`); 404/400 as Problem Details | `@RestController`, record DTOs, `ErrorResponseException`, RFC 9457, `MockMvcTester` | ✅ Done |
 | 9  | Demo producer (`producer` profile): moving tracks + a duplicate, an out-of-order and two invalid messages | `@Profile`, `CommandLineRunner`, `KafkaTemplate`, `@ConfigurationProperties` record + `@Validated` | ✅ Done |
 | 10a | Stretch: stale tracks — `STALE` after 10 s, removed from the picture after 30 s (configurable), checked at startup and every 2 s | `@Scheduled`, `@EnableScheduling`, injectable `Clock`, `ApplicationContextRunner` | ✅ Done |
-| 10b | Stretch: health endpoint / consumer lag | Actuator | ⬜ |
+| 10b | Stretch: `/health` with a `consumerLag` component (lag per partition for the whole group), `/metrics` | Actuator, custom `HealthIndicator`, Kafka `Admin`, Micrometer | ✅ Done |
 | 11 | README: how to run, architecture diagram, decisions, trade-offs, future work | — | ⬜ |
 
 ## Notes & Lessons Learned
@@ -136,3 +136,11 @@ Each step is small, reviewed, and committed before moving on.
   deleted, nothing is left to compare with, and a late or replayed update would revive the track.
 - **Inject a `Clock`** instead of calling `Instant.now()`: tests fix the time. Full-app tests run on
   the real clock, so their timestamps are relative to now.
+- **Consumer lag = latest offset − committed offset**, per partition, read from the broker with the
+  Kafka `Admin` client (like `kafka-consumer-groups.sh --describe`). Spring Boot has no Kafka health
+  indicator, so `ConsumerLagHealthIndicator` is custom. It covers the **whole group**; the Kafka
+  client metric `records-lag-max` only covers this instance's partitions (`NaN` when it has none).
+- **High lag is still `UP`**: a lagging consumer is working off a backlog, and an orchestrator
+  restarting a DOWN instance would make it worse. `DOWN` only when the broker is unreachable or a
+  listener container is stopped. Lag goes in the details, for dashboards/alerts.
+- `show-details: always` is for the local demo; production would use `when-authorized`.
