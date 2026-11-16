@@ -1,9 +1,0 @@
-# Loaded in addition to application.yaml when the "producer" profile is active:
-#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=producer
-# The service then also publishes a demo feed (see DemoProducer) and consumes it as usual.
-# Any value can be overridden on the command line, e.g. --trackstore.demo-producer.ticks=60
-trackstore:
-  demo-producer:
-    tracks: 3
-    ticks: 30
-    interval: 1s

@@ -1,10 +1,7 @@
-package dev.kostas.trackstore.producer;
+package dev.kostas.trackproducer;
 
-import dev.kostas.trackstore.producer.DemoScenario.Kind;
-import dev.kostas.trackstore.producer.DemoScenario.Message;
-import dev.kostas.trackstore.track.TrackUpdate;
-import jakarta.validation.Validation;
-import jakarta.validation.Validator;
+import dev.kostas.trackproducer.DemoScenario.Kind;
+import dev.kostas.trackproducer.DemoScenario.Message;
 import org.junit.jupiter.api.Test;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
@@ -14,9 +11,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DemoScenarioTest {
@@ -26,21 +23,27 @@ class DemoScenarioTest {
     private static final int TICKS = 10;
 
     private final JsonMapper json = JsonMapper.builder().build();
-    private final Validator validator = Validation.buildDefaultValidatorFactory().getValidator();
 
-    /** All messages in publishing order. */
-    private final List<Message> messages = new DemoScenario(new TrackSimulator(TRACKS), json)
-            .build(T0, Duration.ofSeconds(1), TICKS)
-            .stream().flatMap(List::stream).toList();
+    /** All messages of {@value #TICKS} ticks, in publishing order. */
+    private final List<Message> messages = messagesOf(new DemoScenario(new TrackSimulator(TRACKS), json, T0, Duration.ofSeconds(1)));
+
+    private static List<Message> messagesOf(DemoScenario scenario) {
+        return IntStream.range(0, TICKS).mapToObj(tick -> scenario.nextTick()).flatMap(List::stream).toList();
+    }
 
     @Test
     void regularUpdatesAreValidAndKeyedByTrackId() {
         assertThat(ofKind(Kind.UPDATE)).hasSize(TRACKS * TICKS - 1)   // one is the out-of-order one
                 .allSatisfy(message -> {
-                    TrackUpdate update = parse(message);
-                    assertThat(validator.validate(update)).isEmpty();
+                    TrackUpdateMessage update = parse(message);
+                    assertThat(MessageContract.isValid(update)).as(message.payload()).isTrue();
                     assertThat(message.key()).isEqualTo(update.trackId());
                 });
+    }
+
+    @Test
+    void timestampsAreIsoStringsAsTheContractRequires() {
+        assertThat(messages.getFirst().payload()).contains("\"timestamp\":\"2026-01-01T12:00:00Z\"");
     }
 
     @Test
@@ -55,13 +58,12 @@ class DemoScenarioTest {
     @Test
     void containsOneUpdateOlderThanOneAlreadySentForTheSameTrack() {
         assertThat(ofKind(Kind.OUT_OF_ORDER)).singleElement().satisfies(late -> {
-            Instant lateTimestamp = parse(late).timestamp();
             Instant newestBefore = messages.subList(0, messages.indexOf(late)).stream()
                     .filter(m -> m.key().equals(late.key()) && m.kind() != Kind.INVALID)
                     .map(m -> parse(m).timestamp())
                     .max(Instant::compareTo).orElseThrow();
-            assertThat(lateTimestamp).isBefore(newestBefore);
-            assertThat(validator.validate(parse(late))).isEmpty();
+            assertThat(parse(late).timestamp()).isBefore(newestBefore);
+            assertThat(MessageContract.isValid(parse(late))).isTrue();
         });
     }
 
@@ -70,7 +72,7 @@ class DemoScenarioTest {
         List<Message> invalid = ofKind(Kind.INVALID);
 
         assertThat(invalid).hasSize(2);
-        assertThat(validator.validate(parse(invalid.get(0)))).isNotEmpty();
+        assertThat(MessageContract.isValid(parse(invalid.get(0)))).isFalse();
         assertThatThrownBy(() -> parse(invalid.get(1))).isInstanceOf(JacksonException.class);
     }
 
@@ -86,18 +88,20 @@ class DemoScenarioTest {
     }
 
     @Test
-    void needsEnoughTicksForAllAnomalies() {
-        DemoScenario scenario = new DemoScenario(new TrackSimulator(TRACKS), json);
+    void anomaliesHappenOnceThenTracksJustKeepMoving() {
+        DemoScenario scenario = new DemoScenario(new TrackSimulator(TRACKS), json, T0, Duration.ofSeconds(1));
+        IntStream.range(0, DemoScenario.MIN_TICKS).forEach(tick -> scenario.nextTick());
 
-        assertThatIllegalArgumentException()
-                .isThrownBy(() -> scenario.build(T0, Duration.ofSeconds(1), DemoScenario.MIN_TICKS - 1));
+        for (int tick = 0; tick < 20; tick++) {
+            assertThat(scenario.nextTick()).hasSize(TRACKS).extracting(Message::kind).containsOnly(Kind.UPDATE);
+        }
     }
 
     private List<Message> ofKind(Kind kind) {
         return messages.stream().filter(m -> m.kind() == kind).toList();
     }
 
-    private TrackUpdate parse(Message message) {
-        return json.readValue(message.payload(), TrackUpdate.class);
+    private TrackUpdateMessage parse(Message message) {
+        return json.readValue(message.payload(), TrackUpdateMessage.class);
     }
 }

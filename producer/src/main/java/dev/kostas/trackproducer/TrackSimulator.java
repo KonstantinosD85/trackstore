@@ -1,7 +1,4 @@
-package dev.kostas.trackstore.producer;
-
-import dev.kostas.trackstore.track.Identity;
-import dev.kostas.trackstore.track.TrackUpdate;
+package dev.kostas.trackproducer;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -9,13 +6,15 @@ import java.util.List;
 import java.util.stream.IntStream;
 
 /**
- * A handful of tracks flying in straight lines at constant speed, for the demo producer.
+ * A handful of tracks flying in straight lines at constant speed.
  * <p>
  * Stateless and deterministic: the position at any moment is computed from the start position,
  * heading, speed and elapsed time, so the same inputs always give the same updates (easy to test).
  * Uses a flat-earth approximation, which is plenty for a demo that covers a few kilometres.
  */
 final class TrackSimulator {
+
+    static final int MAX_TRACKS = 10;
 
     private static final double METRES_PER_DEGREE_LATITUDE = 111_320.0;
     private static final double START_LATITUDE = 37.90;   // around Athens
@@ -36,19 +35,22 @@ final class TrackSimulator {
                           double speedMetresPerSecond, Double altitude, Identity identity) {
 
         /** Where this track is after flying for {@code elapsed}, observed at {@code timestamp}. */
-        TrackUpdate observedAt(Instant timestamp, Duration elapsed) {
+        TrackUpdateMessage observedAt(Instant timestamp, Duration elapsed) {
             double distance = speedMetresPerSecond * elapsed.toNanos() / 1e9;
             double headingRadians = Math.toRadians(heading);
             double lat = latitude + distance * Math.cos(headingRadians) / METRES_PER_DEGREE_LATITUDE;
             double lon = longitude + distance * Math.sin(headingRadians)
                     / (METRES_PER_DEGREE_LATITUDE * Math.cos(Math.toRadians(latitude)));
-            return new TrackUpdate(trackId, timestamp, round(lat), round(lon), altitude, heading, identity);
+            return new TrackUpdateMessage(trackId, timestamp, round(lat), round(lon), altitude, heading, identity);
         }
     }
 
     private final List<SimulatedTrack> tracks;
 
     TrackSimulator(int trackCount) {
+        if (trackCount < 1 || trackCount > MAX_TRACKS) {
+            throw new IllegalArgumentException("tracks must be between 1 and " + MAX_TRACKS + ", got " + trackCount);
+        }
         this.tracks = IntStream.range(0, trackCount).mapToObj(TrackSimulator::track).toList();
     }
 
@@ -57,7 +59,7 @@ final class TrackSimulator {
     }
 
     /** One update per track: where each track is {@code elapsed} after {@code start}. */
-    List<TrackUpdate> observe(Instant start, Duration elapsed) {
+    List<TrackUpdateMessage> observe(Instant start, Duration elapsed) {
         Instant timestamp = start.plus(elapsed);
         return tracks.stream().map(track -> track.observedAt(timestamp, elapsed)).toList();
     }

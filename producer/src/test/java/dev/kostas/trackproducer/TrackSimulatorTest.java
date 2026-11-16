@@ -1,9 +1,5 @@
-package dev.kostas.trackstore.producer;
+package dev.kostas.trackproducer;
 
-import dev.kostas.trackstore.track.Identity;
-import dev.kostas.trackstore.track.TrackUpdate;
-import jakarta.validation.Validation;
-import jakarta.validation.Validator;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -11,6 +7,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.within;
 
 class TrackSimulatorTest {
@@ -21,7 +18,7 @@ class TrackSimulatorTest {
     void trackFlyingNorthGainsLatitudeOnly() {
         var track = new TrackSimulator.SimulatedTrack("X", 10.0, 20.0, 0.0, 100.0, null, Identity.FRIEND);
 
-        TrackUpdate update = track.observedAt(T0, Duration.ofSeconds(1_113));   // ≈ 111.3 km
+        TrackUpdateMessage update = track.observedAt(T0, Duration.ofSeconds(1_113));   // ≈ 111.3 km
 
         assertThat(update.latitude()).isCloseTo(11.0, within(0.001));
         assertThat(update.longitude()).isEqualTo(20.0);
@@ -31,7 +28,7 @@ class TrackSimulatorTest {
     void trackFlyingEastGainsLongitudeOnly() {
         var track = new TrackSimulator.SimulatedTrack("X", 0.0, 20.0, 90.0, 100.0, null, Identity.FRIEND);
 
-        TrackUpdate update = track.observedAt(T0, Duration.ofSeconds(1_113));
+        TrackUpdateMessage update = track.observedAt(T0, Duration.ofSeconds(1_113));
 
         assertThat(update.latitude()).isCloseTo(0.0, within(1e-6));
         assertThat(update.longitude()).isCloseTo(21.0, within(0.001));
@@ -39,12 +36,10 @@ class TrackSimulatorTest {
 
     @Test
     void observeGivesOneUpdatePerTrackAtStartPlusElapsed() {
-        TrackSimulator simulator = new TrackSimulator(3);
+        List<TrackUpdateMessage> updates = new TrackSimulator(3).observe(T0, Duration.ofSeconds(5));
 
-        List<TrackUpdate> updates = simulator.observe(T0, Duration.ofSeconds(5));
-
-        assertThat(updates).extracting(TrackUpdate::trackId).containsExactly("TRK-001", "TRK-002", "TRK-003");
-        assertThat(updates).extracting(TrackUpdate::timestamp).containsOnly(T0.plusSeconds(5));
+        assertThat(updates).extracting(TrackUpdateMessage::trackId).containsExactly("TRK-001", "TRK-002", "TRK-003");
+        assertThat(updates).extracting(TrackUpdateMessage::timestamp).containsOnly(T0.plusSeconds(5));
     }
 
     @Test
@@ -54,14 +49,19 @@ class TrackSimulatorTest {
     }
 
     @Test
-    void producesOnlyValidUpdatesForAnHourOfTenTracks() {
-        Validator validator = Validation.buildDefaultValidatorFactory().getValidator();
-        TrackSimulator simulator = new TrackSimulator(10);
+    void producesOnlyValidUpdatesForAnHourOfTheMaximumNumberOfTracks() {
+        TrackSimulator simulator = new TrackSimulator(TrackSimulator.MAX_TRACKS);
 
         for (int minute = 0; minute <= 60; minute++) {
-            for (TrackUpdate update : simulator.observe(T0, Duration.ofMinutes(minute))) {
-                assertThat(validator.validate(update)).as("minute %d: %s", minute, update).isEmpty();
-            }
+            assertThat(simulator.observe(T0, Duration.ofMinutes(minute)))
+                    .as("minute %d", minute)
+                    .allMatch(MessageContract::isValid);
         }
+    }
+
+    @Test
+    void rejectsTrackCountOutsideRange() {
+        assertThatIllegalArgumentException().isThrownBy(() -> new TrackSimulator(0));
+        assertThatIllegalArgumentException().isThrownBy(() -> new TrackSimulator(TrackSimulator.MAX_TRACKS + 1));
     }
 }

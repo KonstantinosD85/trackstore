@@ -7,8 +7,12 @@ Each step is small, reviewed, and committed before moving on.
 
 - Java 21, Spring Boot 4.1 (Web MVC, Spring Data JPA, Spring for Apache Kafka)
 - PostgreSQL 17 and Apache Kafka 4.1 (KRaft, single node) via Docker Compose
+- Shortcuts (`Makefile`, `make` lists them): `make infra`, `make server`, `make sim ARGS="--ticks=0"`,
+  `make infra-stop`, `make test`
 - Run locally: `docker compose up -d --wait` (infrastructure + topics), then the service with
   `./mvnw spring-boot:run` or `java -jar target/trackstore-0.0.1-SNAPSHOT.jar`
+- Demo feed (`producer/`, plain Java 21 + kafka-clients): `./mvnw -f producer/pom.xml package`, then
+  `java -jar producer/target/track-producer.jar` (`help` lists the options)
 
 ## Target Design
 
@@ -57,7 +61,7 @@ Each step is small, reviewed, and committed before moving on.
 | 10b | Stretch: `/health` with a `consumerLag` component (lag per partition for the whole group), `/metrics` | Actuator, custom `HealthIndicator`, Kafka `Admin`, Micrometer | ✅ Done |
 | 11 | README: how to run, architecture diagram, decisions, trade-offs, future work | — | ⬜ |
 | 12 | Run without Spring Boot's Docker Compose support: explicit DB config, topics created by Compose, fail fast on missing topics (see below) | Externalized config, `missing-topics-fatal`, Compose healthchecks | ✅ Done |
-| 13 | Demo producer as its own plain-Java application, run independently of the service (see below) | — (plain Java: `KafkaProducer`, shutdown hook) | ⬜ |
+| 13 | Demo producer as its own plain-Java application, run independently of the service (see below); replaces the `producer` profile of step 9 | — (plain Java: `KafkaProducer`, `MockProducer`, shutdown hook) | ✅ Done |
 
 Order: 12 → 13 → 11. The README is written last, so it describes the final way to run everything.
 
@@ -137,7 +141,8 @@ Decisions: a **standalone project** next to the service (not a multi-module buil
   listener. With the same port inside and outside the container (`9092:9092`),
   `localhost:9092` works from both sides.
 - Postgres is published on a **fixed host port** (`5432:5432`) so the service and DBeaver/psql can
-  connect, with a named volume so `docker compose down` keeps the data (`down -v` deletes it).
+  connect. Its data lives in `./postgres-data` (a bind mount, git-ignored), so it survives
+  `docker compose down`; to start with an empty database, stop the services and delete the folder.
 - **Flyway is SQL-first**: migrations are hand-written `V<n>__<name>.sql` files, applied once and
   recorded (with a checksum) in `flyway_schema_history`. Never edit an applied migration — add a
   new one. Hibernate runs with `ddl-auto: validate` as a safety net: the app fails at startup if
@@ -184,12 +189,20 @@ Decisions: a **standalone project** next to the service (not a multi-module buil
 - **Controller tests with `@SpringBootTest` + MockMvc + `@Transactional`**: MockMvc runs the request
   in the test thread, so test data and request share one transaction that is rolled back.
   Future work: pagination/limit for long histories.
-- **The demo producer is a Spring profile** (`./mvnw spring-boot:run -Dspring-boot.run.profiles=producer`):
-  `@Profile("producer")` beans exist only then, and `application-producer.yaml` is loaded on top of
-  `application.yaml`. It talks to Kafka only via `KafkaTemplate` with raw JSON, like an external
-  sensor. Trade-off: it runs in the service's JVM — fine for a demo, a real feed is separate.
+- **The demo producer was first a Spring profile** (step 9), but a `CommandLineRunner` runs *before*
+  the application is ready, so the service reported not-ready for the whole demo. Step 13 moved it
+  to its own plain-Java project (`producer/`): separate process, own copy of the message contract
+  (`TrackUpdateMessage`), no shared code with the service — like a real external sensor feed.
 - **Logic is pure, I/O is thin**: `TrackSimulator` (positions) and `DemoScenario` (which messages,
-  in which order) are plain classes with unit tests; `DemoProducer` only sends and sleeps.
+  in which order) are plain classes with unit tests; `TrackFeedPublisher` only sends and waits. It
+  takes Kafka's `Producer` interface, so tests use `MockProducer` (in-memory) or a real broker.
+- **Stopping cleanly**: Ctrl+C/SIGTERM run JVM shutdown hooks while `main` continues; the hook
+  releases a latch that the pause between ticks waits on, then waits for the producer to be closed.
+  No thread interrupts: they would make the Kafka client's `close()` fail.
+- **The producer fails fast** too: `max.block.ms=10s` turns a missing broker or topic into exit
+  code 1 after 10 s (default 60 s), since the broker no longer auto-creates topics.
+- **Testing a background job from a shell**: a background process in a non-interactive shell
+  ignores SIGINT — use SIGTERM (same shutdown hooks) to stop it.
 - **Two instances in the same consumer group share the partitions** (e.g. IntelliJ + a terminal
   run): each logs only its own partitions' outcomes, but the stored result is the same.
 
