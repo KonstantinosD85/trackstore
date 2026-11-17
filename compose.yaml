@@ -1,6 +1,9 @@
-# Local infrastructure for the track picture service. Start it before the service:
-#   docker compose up -d --wait
-# --wait returns once Postgres and Kafka are healthy and the topics have been created.
+# Local environment of the track picture service. Two ways to use it:
+#   docker compose up -d --wait                         infrastructure only; run the service on the
+#                                                       host (make infra + make server)
+#   docker compose --profile app up -d --build --wait   everything, the service as a container (make up)
+# --wait returns once Postgres and Kafka are healthy and the topics have been created (and, with the
+# app profile, once the service is ready).
 # Prometheus (http://localhost:9090) scrapes the service's metrics once it runs.
 services:
   postgres:
@@ -29,12 +32,16 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9093'
-      KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
-      # Clients connect to the bootstrap address, then to this advertised address. The same port
-      # inside and outside the container makes localhost:9092 work from both sides.
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092'
+      # A client connects twice: to its bootstrap address, which answers "reach me at <advertised
+      # address>", and then to that address for all real traffic. "localhost" means something
+      # different on the host and in each container, so there is one listener per audience:
+      #   PLAINTEXT  :9092   localhost:9092  programs on the host (make server, make sim, IntelliJ)
+      #   DOCKER     :29092  kafka:29092     containers on the Compose network (the trackstore service)
+      KAFKA_LISTENERS: 'PLAINTEXT://:9092,DOCKER://:29092,CONTROLLER://:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092,DOCKER://kafka:29092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,DOCKER:PLAINTEXT'
       # Single broker: internal topics can only have one replica.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -82,3 +89,28 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  trackstore:
+    # The service as a container. Only with the "app" profile, so `docker compose up` (make infra)
+    # still starts just the infrastructure for running the service on the host.
+    profiles: ['app']
+    build: .
+    image: 'trackstore:local'
+    ports:
+      - '8080:8080'   # same port as on the host: Prometheus (host.docker.internal:8080) finds either
+    environment:
+      # application.yaml defaults to localhost (host mode); containers use the service names.
+      SPRING_DATASOURCE_URL: 'jdbc:postgresql://postgres:5432/trackstore'
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: 'kafka:29092'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # Healthy = ready: started and caught up with the topic (the readiness group, see application.yaml).
+      test: ['CMD', 'curl', '-fsS', '-o', '/dev/null', 'http://localhost:8080/health/readiness']
+      start_period: 60s
+      interval: 3s
+      timeout: 3s
+      retries: 20

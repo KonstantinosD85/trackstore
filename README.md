@@ -8,35 +8,26 @@ working.
 
 The step-by-step build log, with every decision and lesson, is in [docs/PLAN.md](docs/PLAN.md).
 
-## Requirements checklist
-
-| Requirement | Status |
-|---|---|
-| Consume `track-updates`; validate; reject invalid updates with a visible reason | ✅ log line with the reason |
-| Picture: latest state per track, `GET /picture`, `GET /tracks/{trackId}` | ✅ |
-| History: every accepted update, `GET /tracks/{trackId}/history?from&to` | ✅ |
-| Ordering: an older update never overwrites a newer state | ✅ |
-| Idempotency: redelivery/replay doesn't corrupt the picture or duplicate history | ✅ |
-| Producer with a duplicate, an out-of-order and an invalid message | ✅ `producer/`, a standalone app |
-| *Stretch:* dead-letter topic | ✅ `track-updates-dlt`, original payload plus the reason in headers |
-| *Stretch:* stale/dropped tracks | ✅ `STALE` after 10 s, removed from the picture after 30 s (configurable) |
-| *Stretch:* rebuild the picture from the topic on restart | ✅ in a different form: the picture is stored in PostgreSQL, and on restart the consumer resumes from its committed offset and catches up; `/health/readiness` stays "not ready" until it has (see [After a restart](#after-a-restart)) |
-| *Stretch:* tests for validation and ordering/idempotency | ✅ 118 service tests and 32 producer tests |
-| *Stretch:* health endpoint with consumer lag | ✅ `/health` → `consumerLag`, and the lag as a Prometheus time series (see [Metrics](#metrics)) |
-
 ## Quick start
 
-Requires Java 21 and Docker. Use three terminals:
+Requires Java 21 and Docker. The service runs either on your machine (for development) or as a
+container next to the infrastructure (like a deployment):
 
 ```bash
+# Service on the host
 make infra    # Postgres + Kafka + Prometheus, creates the topics, returns when ready  (docker compose up -d --wait)
 make server   # the service on http://localhost:8080                       (./mvnw spring-boot:run)
+
+# … or the service as a container (see "Running in a container")
+make up       # builds the image, starts everything, returns once the service is ready
+
+# Either way, in another terminal
 make sim      # the demo feed: 3 tracks, 30 ticks, 1 s apart               (see `make sim-help`)
 ```
 
 `make sim ARGS="--ticks=0"` runs until Ctrl+C. After you stop it, the tracks turn `STALE` after
 10 s and disappear from the picture after 30 s. `make test` runs all the tests. `make infra-stop`
-stops the containers; the database stays in `./postgres-data`. Prometheus is at
+stops all containers; the database stays in `./postgres-data`. Prometheus is at
 http://localhost:9090 (see [Metrics](#metrics)).
 
 What to look for:
@@ -49,6 +40,28 @@ tick 7: sent INVALID for TRK-003 — latitude 91        Rejected track update [�
                                                         latitude must be less than or equal to 90.0 (was 91.0)
 tick 7: sent INVALID for TRK-003 — identity ENEMY     Rejected track update [… key=TRK-003]: unparseable payload: …
 ```
+
+### Running in a container
+
+`make up` runs `docker compose --profile app up -d --build --wait`. The service is in
+`compose.yaml` under the `app` profile, so plain `make infra` still starts only the
+infrastructure. Both modes use port 8080, so only one can run at a time; `make app-stop` stops just
+the container to switch back to `make server`. `make logs` follows its log.
+
+- **Image** ([Dockerfile](Dockerfile)): a multi-stage build. Maven packages the jar, which is split
+  into layers ordered by how often they change. The runtime stage is a JRE only and runs as a
+  non-root user. A code change rebuilds a 53 kB layer; the 81 MB of dependencies stay cached. Tests
+  don't run in the build, since they need Docker themselves (`make test`).
+- **Configuration**: none extra. `application.yaml` defaults to `localhost`; the container gets
+  `SPRING_DATASOURCE_URL` and `SPRING_KAFKA_BOOTSTRAP_SERVERS` pointing at the Compose service names.
+- **Kafka needs a second listener.** A Kafka client connects twice: first to its bootstrap address,
+  which answers "reach me at *advertised address*", then to that address for all real traffic.
+  Kafka used to advertise only `localhost:9092`, which in a container means the container itself,
+  so the client found the broker and then kept connecting to itself. Now there are two listeners:
+  `localhost:9092` for programs on the host and `kafka:29092` for containers.
+- **Healthy means ready**: the container's health check calls `/health/readiness`, so `--wait`
+  returns only after the service has caught up with the topic. `java` is the container's main
+  process, so `docker stop` shuts Spring down gracefully.
 
 ## Architecture
 
@@ -114,11 +127,23 @@ Two details make this safe under concurrency and crashes:
   redelivered record is detected as a duplicate.
 
 Ordering uses the sensor's **`timestamp`**, never arrival time. History also stores `receivedAt`,
-so late arrivals are visible. In this excerpt, `…:14Z` arrived after `…:15Z`:
+so late arrivals are visible. In this excerpt from a history response, the `…:14Z` update was
+observed first, but it reached the service 12 ms after the `…:15Z` update (compare `receivedAt`).
+History keeps both, ordered by `timestamp`, and the picture keeps `…:15Z`:
 
 ```json
-{"timestamp":"2026-11-16T08:36:14Z","latitude":37.999347,"receivedAt":"2026-11-16T08:36:16.065841Z"}
-{"timestamp":"2026-11-16T08:36:15Z","latitude":37.999184,"receivedAt":"2026-11-16T08:36:16.053786Z"}
+[
+  {
+    "timestamp": "2026-11-16T08:36:14Z",
+    "latitude": 37.999347,
+    "receivedAt": "2026-11-16T08:36:16.065841Z"
+  },
+  {
+    "timestamp": "2026-11-16T08:36:15Z",
+    "latitude": 37.999184,
+    "receivedAt": "2026-11-16T08:36:16.053786Z"
+  }
+]
 ```
 
 ### After a restart
@@ -158,13 +183,31 @@ because restarting a lagging consumer only makes it slower.
 
 Any read endpoint returns **503** with `Retry-After: 5` if the database is unreachable (see below).
 
-```json
+```http
 GET /tracks/TRK-002
-{"trackId":"TRK-002","timestamp":"2026-11-16T08:36:19Z","latitude":37.998532,"longitude":23.803657,
- "altitude":1500.0,"heading":117.0,"identity":"UNKNOWN","lastReceivedAt":"2026-11-16T08:36:20.207805Z","status":"ACTIVE"}
 
+{
+  "trackId": "TRK-002",
+  "timestamp": "2026-11-16T08:36:19Z",
+  "latitude": 37.998532,
+  "longitude": 23.803657,
+  "altitude": 1500.0,
+  "heading": 117.0,
+  "identity": "UNKNOWN",
+  "lastReceivedAt": "2026-11-16T08:36:20.207805Z",
+  "status": "ACTIVE"
+}
+```
+
+```http
 GET /tracks/NOPE   → 404, application/problem+json
-{"detail":"No track with id 'NOPE'","instance":"/tracks/NOPE","status":404,"title":"Not Found"}
+
+{
+  "detail": "No track with id 'NOPE'",
+  "instance": "/tracks/NOPE",
+  "status": 404,
+  "title": "Not Found"
+}
 ```
 
 Responses are DTOs, not entities, so the JSON contract doesn't change when a table does. Errors
@@ -179,12 +222,18 @@ pooled connection) and then fail with a generic **500**. Now the pool waits at m
 (`spring.datasource.hikari.connection-timeout`), and `ApiExceptionHandler` turns
 "no connection" into a 503 the client can act on. Measured with `docker compose stop postgres`:
 
-```
+```http
 GET /picture             → 503 in 2.03 s     (before: 500 after 30.07 s)
 Retry-After: 5
 Content-Type: application/problem+json
-{"detail":"The track database is unavailable. Try again shortly.","instance":"/picture",
- "status":503,"title":"Service Unavailable","dependency":"database"}
+
+{
+  "detail": "The track database is unavailable. Try again shortly.",
+  "instance": "/picture",
+  "status": 503,
+  "title": "Service Unavailable",
+  "dependency": "database"
+}
 ```
 
 The body names the dependency but not the cause: exception messages contain hosts and pool
@@ -300,7 +349,6 @@ of the picture. The producer now stamps each tick with the clock, like a real se
 - A **schema registry** (Avro/Protobuf) instead of JSON copied between producer and service, or at
   least **contract tests** between them.
 - Store **partition/offset** in history, to trace any row back to its Kafka record.
-- A replicated, multi-broker Kafka; CI; container images for the service and the producer.
 - A **volume for Kafka** in `compose.yaml`: today `docker compose down` wipes topics and offsets,
   while PostgreSQL keeps its data in `./postgres-data`.
 

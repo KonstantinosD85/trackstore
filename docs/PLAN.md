@@ -65,6 +65,7 @@ Each step is small, reviewed, and committed before moving on.
 | 14 | Readiness waits for catch-up after a restart (`catchUp` in `/health/readiness`, latching); README: restart behaviour and its limits | Health groups, readiness vs liveness probes | ✅ Done |
 | 15 | Database outage on the read API: 503 + `Retry-After` problem response in ~2 s, instead of 500 after 30 s. Read services (`PictureQueryService`, `TrackHistoryQueryService`) throw the domain `TrackNotFoundException`; `ApiExceptionHandler` maps domain/data errors to HTTP | `@RestControllerAdvice`, `@ExceptionHandler`, `ProblemDetail`, `@Service` + `@Transactional(readOnly)`, Hikari `connection-timeout`, `@WebMvcTest` slice | ✅ Done |
 | 16 | Custom metrics + Prometheus: updates by outcome, rejections by reason, update age (histogram), consumer lag per partition as a time series; Prometheus in `compose.yaml` | Micrometer `Counter`/`Timer`/`MultiGauge`, `MeterRegistry`, `/prometheus`, `SimpleMeterRegistry` in tests; fix: the producer stamps each tick with a `Clock` instead of `start + n × interval` | ✅ Done |
+| 17 | The service as a container image, runnable from Compose (`make up`) or on the host (`make server`); second Kafka listener for containers | Multi-stage Dockerfile, layered jar (`jarmode=tools`), Compose profiles, env-var config, advertised listeners | ✅ Done |
 
 Order: 12 → 13 → 11. The README is written last, so it describes the final way to run everything.
 
@@ -270,3 +271,18 @@ Decisions: a **standalone project** next to the service (not a multi-module buil
   sending (with acks) adds ~12 ms per tick. Over an hour that's ~40 s, enough for the service to
   treat a live feed as expired. Stamp from a `Clock` when the data is produced; inject the clock so
   tests stay deterministic (`SteppingClock`).
+- **Kafka advertised listeners** (step 17): a client bootstraps, then connects to the address the
+  broker *advertises*. `localhost` differs per container, so a containerized client found the
+  broker and then dialled itself (`Connection to node 1 (localhost/127.0.0.1:9092) could not be
+  established`). One listener per audience: `localhost:9092` (host), `kafka:29092` (containers).
+  Postgres needs nothing like it: its clients keep the address they dialled.
+- **Changing Kafka's config recreates its container**, and without a volume that wipes topics and
+  offsets (kafka-init recreates the topics; the group starts again from `earliest`).
+- **Layered jar**: dependencies, loader, snapshot dependencies and application in separate image
+  layers → a code change is a 53 kB layer instead of an 81 MB fat jar.
+- **Exec-form `ENTRYPOINT`**: `java` is PID 1 and receives SIGTERM, so shutdown is graceful.
+- **Compose profiles** keep one `compose.yaml` for both modes: `make infra` (no profile) vs
+  `make up` (`--profile app`). Remember the profile when stopping (`--profile app stop`).
+- **Measure warm**: the first ~35 updates after a JVM start include outliers up to 0.5 s (cold JIT,
+  first queries), enough to dominate p95 of a small sample. Warm, containerized: ~37 ms average
+  age, most between 13 and 67 ms (two Docker Desktop network hops per message).

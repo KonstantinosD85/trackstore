@@ -1,0 +1,21 @@
+# Only mvnw, .mvn, pom.xml and src are needed to build the image (see Dockerfile).
+# Everything else stays out of the build context: smaller, faster, and no surprises.
+
+# Owned by the Postgres container's user: unreadable for the build → "permission denied"
+postgres-data/
+
+# Build output (the image builds its own) and the separate producer project
+target/
+producer/
+
+# Not needed in the image
+.git/
+.idea/
+*.iml
+docs/
+prometheus/
+*.md
+Makefile
+compose.yaml
+Dockerfile
+.dockerignore
