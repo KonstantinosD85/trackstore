@@ -1,0 +1,12 @@
+# Prometheus for local development (compose.yaml). It scrapes the service's /prometheus endpoint and
+# keeps the history, so metrics become time series: http://localhost:9090
+global:
+  scrape_interval: 5s       # matches trackstore.ingestion.lag-metric-interval
+
+scrape_configs:
+  - job_name: trackstore
+    metrics_path: /prometheus
+    static_configs:
+      # The service runs on the host (make server), not in Compose; host.docker.internal is the
+      # host as seen from a container (mapped in compose.yaml, so it works on Linux too).
+      - targets: ['host.docker.internal:8080']

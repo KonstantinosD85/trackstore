@@ -21,22 +21,23 @@ The step-by-step build log, with every decision and lesson, is in [docs/PLAN.md]
 | *Stretch:* dead-letter topic | ✅ `track-updates-dlt`, original payload plus the reason in headers |
 | *Stretch:* stale/dropped tracks | ✅ `STALE` after 10 s, removed from the picture after 30 s (configurable) |
 | *Stretch:* rebuild the picture from the topic on restart | ✅ in a different form: the picture is stored in PostgreSQL, and on restart the consumer resumes from its committed offset and catches up; `/health/readiness` stays "not ready" until it has (see [After a restart](#after-a-restart)) |
-| *Stretch:* tests for validation and ordering/idempotency | ✅ 110 service tests and 31 producer tests |
-| *Stretch:* health endpoint with consumer lag | ✅ `/health` → `consumerLag` |
+| *Stretch:* tests for validation and ordering/idempotency | ✅ 118 service tests and 32 producer tests |
+| *Stretch:* health endpoint with consumer lag | ✅ `/health` → `consumerLag`, and the lag as a Prometheus time series (see [Metrics](#metrics)) |
 
 ## Quick start
 
 Requires Java 21 and Docker. Use three terminals:
 
 ```bash
-make infra    # Postgres + Kafka, creates the topics, returns when ready  (docker compose up -d --wait)
+make infra    # Postgres + Kafka + Prometheus, creates the topics, returns when ready  (docker compose up -d --wait)
 make server   # the service on http://localhost:8080                       (./mvnw spring-boot:run)
 make sim      # the demo feed: 3 tracks, 30 ticks, 1 s apart               (see `make sim-help`)
 ```
 
 `make sim ARGS="--ticks=0"` runs until Ctrl+C. After you stop it, the tracks turn `STALE` after
 10 s and disappear from the picture after 30 s. `make test` runs all the tests. `make infra-stop`
-stops the containers; the database stays in `./postgres-data`.
+stops the containers; the database stays in `./postgres-data`. Prometheus is at
+http://localhost:9090 (see [Metrics](#metrics)).
 
 What to look for:
 
@@ -67,6 +68,7 @@ tick 7: sent INVALID for TRK-003 — identity ENEMY     Rejected track update [�
                                                                     │   │
  PictureExpiryJob (every 2 s, also at startup): mark STALE / drop  ─┘   │
  REST: /picture  /tracks/{id}  /tracks/{id}/history  /health  /metrics  ┘
+ Prometheus (compose, :9090) ◄── scrapes /prometheus every 5 s
 ```
 
 It's one deployable with three packages: `ingest` (Kafka → service), `picture` and `history`, each
@@ -151,6 +153,7 @@ because restarting a lagging consumer only makes it slower.
 | `GET /tracks/{trackId}` | The latest state; **404** if unknown or dropped |
 | `GET /tracks/{trackId}/history?from=&to=` | Chronological; `from` inclusive, `to` exclusive, both optional ISO-8601. Unknown track → **404**; known track with nothing in range → `200 []`; `from` after `to` or a bad date → **400** |
 | `GET /health`, `GET /metrics` | Actuator. `consumerLag` shows the lag per partition for the whole consumer group |
+| `GET /prometheus` | All metrics in Prometheus format, scraped by the Prometheus in `compose.yaml` |
 | `GET /health/readiness`, `GET /health/liveness` | Probes. Readiness includes `catchUp` (503 until the backlog after a restart is consumed); liveness doesn't depend on Kafka |
 
 Any read endpoint returns **503** with `Retry-After: 5` if the database is unreachable (see below).
@@ -193,6 +196,48 @@ retries, see below) and continues when the database is back.
 I deliberately **didn't add the database to readiness**: every instance shares it, so an outage
 would take all of them out of rotation at once and the load balancer would answer with its own
 error instead of this 503.
+
+## Metrics
+
+Besides what Spring Boot already measures (HTTP requests by status, Hikari pool, Kafka client,
+`@Scheduled` runs, JVM), the service publishes its own:
+
+| Prometheus name | Type | What it answers |
+|---|---|---|
+| `trackstore_updates_total{outcome}` | counter | Is data flowing? `applied` / `stale` (out of order) / `duplicate` (redelivery, replay) |
+| `trackstore_updates_rejected_total{reason}` | counter | Is a producer sending bad data? `invalid_fields` / `unparseable` / `other` |
+| `trackstore_updates_age_seconds` | histogram | How old is a position when it reaches the picture (now − observation timestamp)? |
+| `trackstore_ingestion_lag_records{partition}` | gauge | How far behind the topic is the consumer group? |
+
+Each answers a question that before was only in the logs or in `/health` (which shows the current
+value, not its history). A few queries for http://localhost:9090 (Graph tab):
+
+```promql
+sum by (outcome) (rate(trackstore_updates_total[1m]))                                # updates/s by outcome
+histogram_quantile(0.95, sum by (le) (rate(trackstore_updates_age_seconds_bucket[1m])))  # p95 age
+sum(trackstore_ingestion_lag_records)                                                # total lag
+```
+
+How I kept them tidy:
+
+- **The business logic doesn't know about metrics.** `TrackUpdateService` returns an outcome; the
+  listener and the error handler (the edges) report to `IngestionMetrics`, which owns the names
+  and tags. `ConsumerLagMetrics` does the same for the lag.
+- **Only tags with a few fixed values** (outcome, reason, partition), never `trackId`: each tag
+  value is its own time series, so per-track tags would grow without limit.
+- **Every series exists from startup at 0**, so `rate()` works before the first event.
+- **The lag is refreshed every 5 s, not on scrape.** Reading it means three calls to the broker,
+  and a scrape shouldn't wait for a broker that is down. If the lag can't be read, its series are
+  removed: a gap in the graph says "unknown", while a frozen last value would look healthy.
+
+From a live run: the demo feed gave exactly the expected counts (299 applied, 1 duplicate, 1 stale,
+1 rejected per reason). After a restart with a backlog, the lag series showed `8003`, then `0` five
+seconds later. And the age metric found something I hadn't noticed: **positions were 2.8 s old on
+average (max 4.2 s)**, although everything runs on one machine. The cause was the demo producer,
+not the consumer: it stamped tick *n* with `start + n × interval`, and real time ran ahead of that
+by the time each tick took to send (~12 ms). With `--ticks=0` the age kept rising, by ~0.7 s a
+minute: after ~15 minutes "live" tracks flickered to `STALE`, and after ~40 they'd have dropped out
+of the picture. The producer now stamps each tick with the clock, like a real sensor.
 
 ## Decisions and trade-offs
 
@@ -238,6 +283,11 @@ error instead of this 503.
   throws when PostgreSQL is down → 503 problem response, no internal details in the body. (The
   live outage above was checked by hand; stopping the shared test database would break the other
   tests.)
+- **Metrics:** unit tests with an in-memory `SimpleMeterRegistry` and a fixed clock (names, tags,
+  age only for applied updates, lag series removed when unknown), and an end-to-end test that the
+  counters move. `/prometheus` itself was checked live: export to a monitoring system is off in
+  Spring tests, and `@AutoConfigureMetrics` would start a second test context whose listeners would
+  share the partitions with the first.
 - **Producer:** `MockProducer` for the publishing loop, plus a real broker to check that records
   are keyed so that each track stays on one partition.
 
@@ -245,7 +295,8 @@ error instead of this 503.
 
 - History **pagination/limits**, and retention or table partitioning for long-running data.
 - Actuator on a **separate management port** with authentication; the API also has none today.
-- **Counters per outcome** (`APPLIED`/`STALE`/`DUPLICATE`/rejected) as metrics, and alerts on lag.
+- **Alerts** (Prometheus rules on lag and age) and a Grafana dashboard; gauges for the picture
+  (tracks by status and identity), refreshed by the expiry job rather than counted on each scrape.
 - A **schema registry** (Avro/Protobuf) instead of JSON copied between producer and service, or at
   least **contract tests** between them.
 - Store **partition/offset** in history, to trace any row back to its Kafka record.

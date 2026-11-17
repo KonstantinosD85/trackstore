@@ -25,7 +25,7 @@ class DemoScenarioTest {
     private final JsonMapper json = JsonMapper.builder().build();
 
     /** All messages of {@value #TICKS} ticks, in publishing order. */
-    private final List<Message> messages = messagesOf(new DemoScenario(new TrackSimulator(TRACKS), json, T0, Duration.ofSeconds(1)));
+    private final List<Message> messages = messagesOf(new DemoScenario(new TrackSimulator(TRACKS), json, new SteppingClock(T0, Duration.ofSeconds(1))));
 
     private static List<Message> messagesOf(DemoScenario scenario) {
         return IntStream.range(0, TICKS).mapToObj(tick -> scenario.nextTick()).flatMap(List::stream).toList();
@@ -88,8 +88,24 @@ class DemoScenarioTest {
     }
 
     @Test
+    void timestampsAreTheClockAtEachTickNotStartPlusTicksTimesInterval() {
+        // Real ticks take longer than the interval (sending, waiting for acks). The timestamps must
+        // follow the clock, and the positions the real elapsed time, or the feed drifts into the past.
+        DemoScenario scenario = new DemoScenario(new TrackSimulator(1), json,
+                new SteppingClock(T0, Duration.ofMillis(1_037)));
+
+        TrackUpdateMessage first = parse(scenario.nextTick().getFirst());
+        TrackUpdateMessage second = parse(scenario.nextTick().getFirst());
+
+        assertThat(first.timestamp()).isEqualTo(T0);
+        assertThat(second.timestamp()).isEqualTo(T0.plusMillis(1_037));
+        TrackUpdateMessage expected = new TrackSimulator(1).observe(T0, Duration.ofMillis(1_037)).getFirst();
+        assertThat(second).isEqualTo(expected);   // moved as far as the clock says, not one interval
+    }
+
+    @Test
     void anomaliesHappenOnceThenTracksJustKeepMoving() {
-        DemoScenario scenario = new DemoScenario(new TrackSimulator(TRACKS), json, T0, Duration.ofSeconds(1));
+        DemoScenario scenario = new DemoScenario(new TrackSimulator(TRACKS), json, new SteppingClock(T0, Duration.ofSeconds(1)));
         IntStream.range(0, DemoScenario.MIN_TICKS).forEach(tick -> scenario.nextTick());
 
         for (int tick = 0; tick < 20; tick++) {

@@ -1,5 +1,5 @@
 # Shortcuts for local development. Typical session, each in its own terminal:
-#   make infra     # Postgres + Kafka + topics (returns when ready)
+#   make infra     # Postgres + Kafka + topics + Prometheus (returns when ready)
 #   make server    # the track picture service, http://localhost:8080
 #   make sim       # the demo track feed; options via ARGS, e.g. make sim ARGS="--ticks=0"
 
@@ -12,7 +12,7 @@ PRODUCER_SOURCES := producer/pom.xml $(shell find producer/src/main -type f 2>/d
 help: ## List the available commands
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-11s %s\n", $$1, $$2}'
 
-infra: ## Start Postgres and Kafka and create the topics; waits until ready
+infra: ## Start Postgres, Kafka and Prometheus and create the topics; waits until ready
 	docker compose up -d --wait
 
 infra-stop: ## Stop the infrastructure (data in ./postgres-data is kept)

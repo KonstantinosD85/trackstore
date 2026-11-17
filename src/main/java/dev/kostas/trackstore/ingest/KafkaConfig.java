@@ -67,7 +67,7 @@ public class KafkaConfig implements KafkaListenerConfigurer {
      * </ul>
      */
     @Bean
-    DefaultErrorHandler kafkaErrorHandler(KafkaOperations<?, ?> kafkaTemplate) {
+    DefaultErrorHandler kafkaErrorHandler(KafkaOperations<?, ?> kafkaTemplate, IngestionMetrics metrics) {
         DeadLetterPublishingRecoverer deadLetter = new DeadLetterPublishingRecoverer(kafkaTemplate,
                 // Partition -1: let Kafka choose by key, so the DLT needn't match the source's partitions.
                 (record, exception) -> new TopicPartition(Topics.TRACK_UPDATES_DLT, -1));
@@ -77,6 +77,8 @@ public class KafkaConfig implements KafkaListenerConfigurer {
                     record.topic(), record.partition(), record.offset(), record.key(),
                     RejectionReason.describe(exception));
             deadLetter.accept(record, exception);
+            // Counted only once the DLT publish succeeded; if it throws, the record is retried.
+            metrics.rejected(exception);
         };
 
         ExponentialBackOff backOff = new ExponentialBackOff(Duration.ofMillis(500).toMillis(), 2.0);

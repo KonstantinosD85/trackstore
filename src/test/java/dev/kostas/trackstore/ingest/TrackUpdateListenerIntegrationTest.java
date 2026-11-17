@@ -8,6 +8,7 @@ import dev.kostas.trackstore.picture.TrackState;
 import dev.kostas.trackstore.picture.TrackStateRepository;
 import dev.kostas.trackstore.picture.TrackStatus;
 import dev.kostas.trackstore.track.Identity;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -65,6 +66,9 @@ class TrackUpdateListenerIntegrationTest {
     @Autowired
     private TrackStateRepository picture;
 
+    @Autowired
+    private MeterRegistry meters;
+
     private final String trackId = "TRK-" + UUID.randomUUID();
 
     private Consumer<String, String> deadLetterConsumer;
@@ -112,6 +116,33 @@ class TrackUpdateListenerIntegrationTest {
         assertThat(state.getLatitude()).isEqualTo(12.0);
         assertThat(historyOfTrack()).extracting(TrackHistoryEntry::getObservedAt)
                 .containsExactly(t0, t0.plusSeconds(1), t0.plusSeconds(2));
+    }
+
+    @Test
+    void metricsCountOutcomesRejectionsAndAge() {
+        // Counters are shared by the whole test context, so compare before/after.
+        double applied = updates("applied"), stale = updates("stale"), duplicate = updates("duplicate");
+        double invalid = rejected("invalid_fields"), unparseable = rejected("unparseable");
+        long ages = meters.get("trackstore.updates.age").timer().count();
+
+        publish(update(t0, 10.0, "FRIEND"));                    // applied
+        publish(update(t0.plusSeconds(2), 12.0, "FRIEND"));     // applied
+        publish(update(t0.plusSeconds(1), 11.0, "FRIEND"));     // stale (out of order)
+        publish(update(t0.plusSeconds(2), 12.0, "FRIEND"));     // duplicate
+        publish(update(t0, 91.0, "FRIEND"));                    // rejected: invalid fields
+        publish("not json");                                    // rejected: unparseable, and the barrier
+        // Same key → same partition, in order: once the barrier is dead-lettered, all of the above are done.
+        await().atMost(TIMEOUT).until(() -> StreamSupport
+                .stream(deadLetterConsumer.poll(Duration.ofMillis(500)).spliterator(), false)
+                .anyMatch(record -> trackId.equals(record.key()) && "not json".equals(record.value())));
+
+        // At least: records of other tests may still be finishing in the shared context.
+        assertThat(updates("applied") - applied).isGreaterThanOrEqualTo(2);
+        assertThat(updates("stale") - stale).isGreaterThanOrEqualTo(1);
+        assertThat(updates("duplicate") - duplicate).isGreaterThanOrEqualTo(1);
+        assertThat(rejected("invalid_fields") - invalid).isGreaterThanOrEqualTo(1);
+        assertThat(rejected("unparseable") - unparseable).isGreaterThanOrEqualTo(1);
+        assertThat(meters.get("trackstore.updates.age").timer().count() - ages).isGreaterThanOrEqualTo(2);
     }
 
     @Test
@@ -178,6 +209,14 @@ class TrackUpdateListenerIntegrationTest {
     }
 
     // --- helpers -------------------------------------------------------------------------------
+
+    private double updates(String outcome) {
+        return meters.get("trackstore.updates").tag("outcome", outcome).counter().count();
+    }
+
+    private double rejected(String reason) {
+        return meters.get("trackstore.updates.rejected").tag("reason", reason).counter().count();
+    }
 
     private String update(Instant timestamp, double latitude, String identity) {
         return """

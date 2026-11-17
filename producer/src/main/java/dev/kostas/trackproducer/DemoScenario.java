@@ -2,8 +2,10 @@ package dev.kostas.trackproducer;
 
 import tools.jackson.databind.json.JsonMapper;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -19,8 +21,13 @@ import java.util.List;
  * </ul>
  * Each anomaly happens once; after that the tracks just keep moving, for as many ticks as asked.
  * <p>
+ * Timestamps come from the {@link Clock}, read when a tick is built, like a sensor stamping the
+ * moment it observes. (Computing them as {@code start + tick × interval} drifted behind real time by
+ * the time each tick took to send, ~12 ms per tick: after an hour, "live" positions were ~40 s old
+ * and the service dropped them as expired.)
+ * <p>
  * Builds messages without sending them, so the scenario can be unit-tested. Stateful (the current
- * tick, the held-back update): use one instance per run.
+ * tick, the held-back update, the start time): use one instance per run.
  */
 final class DemoScenario {
 
@@ -38,18 +45,16 @@ final class DemoScenario {
 
     private final TrackSimulator simulator;
     private final JsonMapper json;
-    private final Instant start;
-    private final Duration interval;
+    private final Clock clock;
 
     private int tick = 0;
+    private Instant start;   // time of the first tick; positions are computed from it
     private Message heldBack;
 
-    /** Tick {@code n} observes the tracks at {@code start + n * interval}. */
-    DemoScenario(TrackSimulator simulator, JsonMapper json, Instant start, Duration interval) {
+    DemoScenario(TrackSimulator simulator, JsonMapper json, Clock clock) {
         this.simulator = simulator;
         this.json = json;
-        this.start = start;
-        this.interval = interval;
+        this.clock = clock;
     }
 
     /** The messages of the next tick, in publishing order. */
@@ -60,7 +65,12 @@ final class DemoScenario {
         int invalid = 2 % trackCount;
 
         List<Message> messages = new ArrayList<>();
-        List<TrackUpdateMessage> updates = simulator.observe(start, interval.multipliedBy(tick));
+        // Milliseconds, like a typical sensor; one reading per tick, so all tracks share it.
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+        if (start == null) {
+            start = now;
+        }
+        List<TrackUpdateMessage> updates = simulator.observe(start, Duration.between(start, now));
 
         for (int track = 0; track < trackCount; track++) {
             Message message = update(updates.get(track));

@@ -43,9 +43,10 @@ management:
     web:
       # Serve the endpoints at the root (/health, /metrics) instead of under /actuator.
       base-path: /
-      # /health (incl. consumer lag) and /metrics (incl. Kafka client metrics).
+      # /health (incl. consumer lag), /metrics (browse by name) and /prometheus (scraped by the
+      # Prometheus in compose.yaml, which keeps the history: time series, graphs).
       exposure:
-        include: health, metrics
+        include: health, metrics, prometheus
   endpoint:
     health:
       show-details: always
@@ -54,11 +55,17 @@ management:
         # (/health/liveness stays independent of Kafka: a lagging consumer must not be restarted.)
         readiness:
           include: readinessState, catchUp
+  metrics:
+    tags:
+      # On every metric, so several services can share one Prometheus.
+      application: ${spring.application.name}
 
 trackstore:
   ingestion:
     # Ready for traffic once the total consumer lag has dropped to this many records (see CatchUpHealthIndicator).
     ready-max-lag: 10
+    # How often the trackstore.ingestion.lag metric is refreshed from the broker (see ConsumerLagMetrics).
+    lag-metric-interval: 5s
   picture:
     # Ages are measured from the track's latest observation timestamp (see PictureExpiryJob).
     stale-after: 10s      # no observation for this long → status STALE

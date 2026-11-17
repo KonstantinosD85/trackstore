@@ -64,6 +64,7 @@ Each step is small, reviewed, and committed before moving on.
 | 13 | Demo producer as its own plain-Java application, run independently of the service (see below); replaces the `producer` profile of step 9 | — (plain Java: `KafkaProducer`, `MockProducer`, shutdown hook) | ✅ Done |
 | 14 | Readiness waits for catch-up after a restart (`catchUp` in `/health/readiness`, latching); README: restart behaviour and its limits | Health groups, readiness vs liveness probes | ✅ Done |
 | 15 | Database outage on the read API: 503 + `Retry-After` problem response in ~2 s, instead of 500 after 30 s. Read services (`PictureQueryService`, `TrackHistoryQueryService`) throw the domain `TrackNotFoundException`; `ApiExceptionHandler` maps domain/data errors to HTTP | `@RestControllerAdvice`, `@ExceptionHandler`, `ProblemDetail`, `@Service` + `@Transactional(readOnly)`, Hikari `connection-timeout`, `@WebMvcTest` slice | ✅ Done |
+| 16 | Custom metrics + Prometheus: updates by outcome, rejections by reason, update age (histogram), consumer lag per partition as a time series; Prometheus in `compose.yaml` | Micrometer `Counter`/`Timer`/`MultiGauge`, `MeterRegistry`, `/prometheus`, `SimpleMeterRegistry` in tests; fix: the producer stamps each tick with a `Clock` instead of `start + n × interval` | ✅ Done |
 
 Order: 12 → 13 → 11. The README is written last, so it describes the final way to run everything.
 
@@ -250,3 +251,22 @@ Decisions: a **standalone project** next to the service (not a multi-module buil
   the service could be called from elsewhere (a CLI, a Kafka consumer) without HTTP leaking in.
   Request validation (`from > to` → 400) stays in the controller: it's about a malformed request,
   not a business answer.
+- **Metrics stay at the edges** (step 16): `TrackUpdateService` returns a `ProcessingOutcome`; the
+  listener and the DLT recoverer report it to `IngestionMetrics`, which owns all names and tags.
+  Same idea as domain exceptions vs `ApiExceptionHandler`.
+- **Tags = few fixed values** (enums). Every distinct tag value is a separate time series, so a
+  `trackId` tag would grow memory in the app and in Prometheus without limit.
+- **Pre-register every series at 0**, otherwise `rate()` has no starting point until the first event.
+- **Expensive gauges: refresh on a schedule, read on scrape.** The lag needs three broker calls; on
+  failure the series are removed (gap = unknown) rather than frozen at the last value.
+- **`/metrics` vs `/prometheus`**: `/metrics` is a browser for current values; time series need
+  something that scrapes and stores them (Prometheus, every 5 s here).
+- **Metrics in Spring tests**: `@SpringBootTest` gets only an in-memory registry (export off).
+  `@AutoConfigureMetrics` turns export on, but a different annotation = a different cached context =
+  a second set of Kafka listeners in the same group, which would steal partitions from the first.
+- **The age metric found a producer bug** in its first run: synthetic timestamps drift behind real
+  time. Lag (a record count) can't show that; age (a time) can.
+- **Synthetic time drifts**: `start + n × interval` assumes a tick takes exactly `interval`, but
+  sending (with acks) adds ~12 ms per tick. Over an hour that's ~40 s, enough for the service to
+  treat a live feed as expired. Stamp from a `Clock` when the data is produced; inject the clock so
+  tests stay deterministic (`SteppingClock`).

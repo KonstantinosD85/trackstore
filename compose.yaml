@@ -1,6 +1,7 @@
 # Local infrastructure for the track picture service. Start it before the service:
 #   docker compose up -d --wait
 # --wait returns once Postgres and Kafka are healthy and the topics have been created.
+# Prometheus (http://localhost:9090) scrapes the service's metrics once it runs.
 services:
   postgres:
     image: 'postgres:17'
@@ -66,3 +67,18 @@ services:
             --create --if-not-exists --topic "$$topic" --partitions 3 --replication-factor 1
         done
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe
+
+  prometheus:
+    # Scrapes http://<host>:8080/prometheus every 5 s and stores the time series (graphs, alerts).
+    image: 'prom/prometheus:v3.5.0'
+    ports:
+      - '9090:9090'
+    volumes:
+      - './prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'   # Docker Desktop has it built in; Linux needs this
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:9090/-/ready']
+      interval: 2s
+      timeout: 5s
+      retries: 30

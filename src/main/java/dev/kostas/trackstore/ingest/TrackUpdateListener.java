@@ -32,9 +32,12 @@ public class TrackUpdateListener {
     private static final Logger log = LoggerFactory.getLogger(TrackUpdateListener.class);
 
     private final TrackUpdateService service;
+    private final IngestionMetrics metrics;
 
-    public TrackUpdateListener(TrackUpdateService service) {
+    // Package-private: only Spring creates the listener, and IngestionMetrics is internal to this package.
+    TrackUpdateListener(TrackUpdateService service, IngestionMetrics metrics) {
         this.service = service;
+        this.metrics = metrics;
     }
 
     @KafkaListener(topics = Topics.TRACK_UPDATES)
@@ -42,6 +45,9 @@ public class TrackUpdateListener {
                               @Header(KafkaHeaders.RECEIVED_PARTITION) int partition,
                               @Header(KafkaHeaders.OFFSET) long offset) {
         ProcessingOutcome outcome = service.process(update);
+        // After the transaction committed. If process() throws, nothing is counted: the record is
+        // retried, and counted once when it finally succeeds.
+        metrics.processed(update, outcome);
         log.info("{} trackId={} timestamp={} [partition={}, offset={}]",
                 outcome, update.trackId(), update.timestamp(), partition, offset);
     }

@@ -12,12 +12,43 @@ import java.util.Comparator;
 import java.util.stream.Collectors;
 
 /**
- * Turns the exception behind a rejected record into a short, human-readable reason for the log,
- * e.g. {@code "invalid fields: latitude must be less than or equal to 90.0 (was 91.0)"}.
+ * Explains the exception behind a rejected record, two ways:
+ * <ul>
+ *   <li>{@link #describe}: a detailed, human-readable reason for the log, e.g.
+ *       {@code "invalid fields: latitude must be less than or equal to 90.0 (was 91.0)"};</li>
+ *   <li>{@link #categorize}: one of a few fixed {@link Category categories}, for a metric tag
+ *       (a tag must have few distinct values, so never the detailed text).</li>
+ * </ul>
  */
 final class RejectionReason {
 
+    /** Why a record was rejected, coarse enough to be a metric tag. */
+    enum Category {
+        /** Valid JSON, but a field breaks a validation rule (e.g. latitude 91). */
+        INVALID_FIELDS,
+        /** Not readable as a track update (malformed JSON, unknown identity, bad timestamp). */
+        UNPARSEABLE,
+        /** Anything else the error handler gave up on. */
+        OTHER;
+
+        /** Tag value, e.g. {@code "invalid_fields"}. */
+        String tag() {
+            return name().toLowerCase(java.util.Locale.ROOT);
+        }
+    }
+
     private RejectionReason() {
+    }
+
+    static Category categorize(Throwable exception) {
+        Throwable cause = unwrap(exception);
+        if (cause instanceof MethodArgumentNotValidException) {
+            return Category.INVALID_FIELDS;
+        }
+        if (cause instanceof ConversionException || cause instanceof MessageConversionException) {
+            return Category.UNPARSEABLE;
+        }
+        return Category.OTHER;
     }
 
     static String describe(Throwable exception) {
@@ -26,7 +57,7 @@ final class RejectionReason {
         if (cause instanceof MethodArgumentNotValidException invalid && invalid.getBindingResult() != null) {
             return "invalid fields: " + describe(invalid.getBindingResult());
         }
-        if (cause instanceof ConversionException || cause instanceof MessageConversionException) {
+        if (categorize(cause) == Category.UNPARSEABLE) {
             // The root cause is Jackson's, e.g. "Cannot deserialize value of type `Identity` from String "ENEMY" ..."
             return "unparseable payload: " + firstLine(NestedExceptionUtils.getMostSpecificCause(cause).getMessage());
         }

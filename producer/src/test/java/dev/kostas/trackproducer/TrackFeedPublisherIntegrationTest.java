@@ -14,8 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.kafka.KafkaContainer;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -50,7 +50,7 @@ class TrackFeedPublisherIntegrationTest {
     @Test
     void recordsReachKafkaAndAllUpdatesOfATrackLandOnOnePartition() throws Exception {
         DemoScenario scenario = new DemoScenario(new TrackSimulator(3), JsonMapper.builder().build(),
-                Instant.now(), Duration.ofMillis(10));
+                Clock.systemUTC());
 
         try (Producer<String, String> producer = Main.createProducer(KAFKA.getBootstrapServers())) {
             new TrackFeedPublisher(producer, TOPIC).publish(scenario, DemoScenario.MIN_TICKS, Duration.ofMillis(10),

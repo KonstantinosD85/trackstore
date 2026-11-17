@@ -8,8 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.jackson.databind.json.JsonMapper;
 
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.Clock;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -65,7 +64,7 @@ public final class Main {
         }, "shutdown"));
 
         DemoScenario scenario = new DemoScenario(new TrackSimulator(settings.tracks()), JsonMapper.builder().build(),
-                Instant.now().truncatedTo(ChronoUnit.SECONDS), settings.interval());
+                Clock.systemUTC());
 
         try (Producer<String, String> producer = createProducer(settings.bootstrapServers())) {
             int ticks = new TrackFeedPublisher(producer, settings.topic())

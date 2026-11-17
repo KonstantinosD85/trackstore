@@ -71,6 +71,6 @@ class TrackFeedPublisherTest {
     }
 
     private static DemoScenario scenario() {
-        return new DemoScenario(new TrackSimulator(3), JsonMapper.builder().build(), T0, INTERVAL);
+        return new DemoScenario(new TrackSimulator(3), JsonMapper.builder().build(), new SteppingClock(T0, INTERVAL));
     }
 }
